@@ -1,0 +1,56 @@
+# Temporal Workflow Orchestration Configuration
+temporal:
+  enabled: true
+  host_port: "localhost:7233"
+  namespace: "pulse-namespace"
+  task_queue: "payment-processing-queue"
+  workflow_execution_timeout: "5m"
+  worker_count: 10
+
+# Spanner Storage Configuration
+storage:
+  type: "spanner"
+  connection: "pulse-project"
+  database: "payment-transactions"
+  enabled: true
+
+# Router Configuration
+router:
+  health_check_interval: "10s"
+  default_region: "us_east"
+  bin_routes:
+    "4": "us_east" # Visa cards to US East
+    "51": "eu_west" # European Mastercard to EU West
+    "34": "us_east" # Amex to US East
+    "35": "eu_west" # JCB to EU West
+    "400000-499999": "us_east" # Range example
+  failover_map:
+    "us_east": "eu_west"
+    "eu_west": "us_east"
+
+# Regions Configuration
+regions:
+  us_east:
+    address: "localhost:50051"
+  eu_west:
+    address: "localhost:50052"
+
+# ISO8583 Server Configuration
+iso8583_server:
+  address: "0.0.0.0:8583"
+
+# Metrics Configuration
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+
+# Chaos Testing Configuration
+chaos:
+  enabled: false
+  fault_probability: 0.05 # 5% probability
+  fault_types:
+    - "processing_message"
+    - "network_timeout"
+    - "server_error"
+  min_delay_ms: 200
+  max_delay_ms: 1500
