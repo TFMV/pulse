@@ -1,66 +1,89 @@
-# Pulse
+# Pulse: Global Transaction Router
 
-Pulse is a simplified prototype of a Global Transaction Router inspired by American Express's architecture. It simulates the flow of ISO 8583 messages over TCP from external clients, converts them to gRPC protobuf requests, routes them internally based on BIN ranges, and returns ISO 8583 responses.
+A simplified payment transaction routing system inspired by American Express's architecture, implementing ISO 8583 processing with modern technologies.
 
-## Features
+## Overview
 
-- ISO 8583 TCP server for receiving and responding to transaction messages
-- BIN-based regional routing with configurable routing rules
-- Internal gRPC service communication between components
-- Multiple regional backend processors (US East and EU West)
-- Support for chaos testing and fault injection
-- Interactive client for testing
-- **Multi-Region Observability** with Prometheus metrics
-- **Automatic Failover** between regions with circuit breaker logic
-- **Health Monitoring** for regional systems
-- **Spanner Integration** for transaction persistence and historical lookups
+Pulse simulates the flow of ISO 8583 messages over TCP from external clients, converts them to gRPC protobuf requests, routes them internally based on BIN ranges, and returns ISO 8583 responses. The system implements modern architectural patterns while maintaining compatibility with legacy payment protocols.
+
+## Key Features
+
+- **ISO 8583 Processing**: TCP server for receiving and responding to financial transaction messages
+- **Protocol Transformation**: Converts ISO 8583 messages to Protocol Buffers and back
+- **BIN-based Routing**: Routes transactions to different regional processors based on card BIN ranges
+- **Multi-Region Architecture**: Supports multiple backend processors (US East and EU West)
+- **Fault Tolerance**: Circuit breaker pattern with automatic failover between regions
+- **Observability**: Comprehensive Prometheus metrics for monitoring system health
+- **Chaos Testing**: Support for fault injection to test resilience
+- **Transaction Storage**: Integration with Google Cloud Spanner for persistent transaction history
 
 ## Architecture
 
+```mermaid
+graph TD
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    classDef processor fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
+    
+    A1[Payment Client] -.ISO 8583<br>over TCP.-> A2
+    A2[ISO 8583 Server] --> A3
+    A3[Router ISO→Proto] --> A4
+    A4[Regional Routing] --> A5
+    A4 --> A6
+    A5[US East Processor]
+    A6[EU West Processor]
+    A3 -.->|Async Storage| A7[Spanner]
+    
+    class A1 external
+    class A2,A3,A4 internal
+    class A5,A6 processor
+    class A7 storage
+```
+
 Pulse consists of the following components:
 
-1. **ISO 8583 TCP Server**: Listens for incoming ISO 8583 messages
-2. **Message Router**: Translates ISO messages to Protobuf and routes to the appropriate region
-3. **Regional Processors**: gRPC services that implement business logic for each region
-4. **Chaos Engine**: Optional component for injecting faults and simulating issues
-5. **Health Monitor**: Tracks and reports regional service health status
-6. **Metrics Endpoint**: Exposes Prometheus metrics for observability
-7. **Storage Layer**: Integration with Google Cloud Spanner for transaction persistence
+1. **ISO 8583 TCP Server**: Accepts incoming financial messages over persistent TCP connections
+2. **Message Router**: Translates ISO messages to Protocol Buffers and determines appropriate routing
+3. **Regional Processors**: gRPC services implementing business logic for each region
+4. **Health Monitor**: Tracks regional service health and implements circuit breaking for reliability
+5. **Metrics System**: Provides real-time observability with Prometheus
+6. **Storage Layer**: Persists transaction data using Google Cloud Spanner
 
 ## Getting Started
 
 ### Prerequisites
 
 - Go 1.19 or later
-- `protoc` for protocol buffer compilation
+- Protocol Buffers compiler (`protoc`)
 - Prometheus (optional, for metrics collection)
 
 ### Installation
 
 1. Clone the repository:
 
-   ```
+   ```bash
    git clone https://github.com/TFMV/pulse.git
    cd pulse
    ```
 
 2. Install dependencies:
 
-   ```
+   ```bash
    go mod tidy
    ```
 
 3. Generate gRPC code from protobuf:
 
+   ```bash
+   protoc --go_out=. --go-grpc_out=. proto/auth.proto
    ```
-   protoc --go_out=. --go-grpc_out=. *.proto
-   ```
 
-### Running the Server
+### Running Pulse
 
-To run the server with default settings:
+#### Starting the Server
 
-```
+```bash
 go run main.go
 ```
 
@@ -71,34 +94,31 @@ This starts:
 - EU West gRPC service on 0.0.0.0:50052
 - Prometheus metrics endpoint on 0.0.0.0:9090
 
-Command-line options:
+#### Command-line Options
 
-- `--iso-addr`: Address for ISO8583 TCP server (default: `0.0.0.0:8583`)
-- `--config`: Path to routing configuration (default: `config/routes.yaml`)
-- `--inject-faults`: Enable chaos testing with fault injection
-- `--metrics`: Address for Prometheus metrics endpoint (default: `0.0.0.0:9090`)
+- `--config`: Path to configuration file (default: `config/config.yaml`)
+- `--iso-addr`: Address for ISO 8583 server (default: `0.0.0.0:8583`)
+- `--metrics`: Address for Prometheus metrics (default: `0.0.0.0:9090`)
+- `--chaos`: Enable chaos testing with fault injection
+- `--client`: Run in client mode (for testing)
 
-### Running the Client
+#### Using the Test Client
 
-To run the interactive client:
+To send test transactions:
 
-```
+```bash
 go run main.go --client --server localhost:8583
 ```
 
-This allows you to send test transactions with different PAN/amount combinations.
+This launches an interactive client for sending sample transactions.
 
 ## Configuration
 
-The configuration is stored in `config/config.yaml` and defines:
+The system is configured via YAML files stored in the `config` directory.
 
-- BIN-to-region routing rules
-- Regional service configurations
-- Failover configuration
-- Chaos testing settings
-- Spanner database configuration
+### Main Configuration File
 
-Example:
+The main configuration file (`config/config.yaml`) includes:
 
 ```yaml
 router:
@@ -117,7 +137,6 @@ router:
       port: 50052
       timeout_ms: 8000
 
-  # Failover configuration mapping primary regions to fallback regions
   failover_map:
     "us-east": "eu-west"
     "eu-west": "us-east"
@@ -134,17 +153,65 @@ spanner:
   database_id: "pulse-db"
 ```
 
-## Observability & Metrics
+## Reliability Features
 
-Pulse exposes Prometheus metrics at the `/metrics` endpoint that can be scraped by a Prometheus server. The following metrics are available:
+### Circuit Breaker Pattern
 
-- **pulse_requests_total**: Count of processed requests with labels for region, MTI, and response code
-- **pulse_response_latency_seconds**: Histogram of response latencies by region and MTI
-- **pulse_errors_total**: Count of errors with labels for region and error type
-- **pulse_region_health**: Gauge showing health status by region (1.0 = healthy, 0.0 = unhealthy)
-- **pulse_spanner_write_latency_seconds**: Histogram of Spanner write latencies
-- **pulse_spanner_read_latency_seconds**: Histogram of Spanner read latencies
-- **pulse_spanner_errors_total**: Count of Spanner errors by operation and error type
+Pulse implements a sophisticated circuit breaker for automatic failover:
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    
+    CLOSED --> OPEN: 5+ consecutive failures
+    OPEN --> HALF_OPEN: 30s timeout
+    HALF_OPEN --> CLOSED: Success
+    HALF_OPEN --> OPEN: Failure
+```
+
+- **Circuit States**:
+  - **CLOSED**: Normal operation, all requests processed
+  - **OPEN**: Circuit broken, requests redirected to failover region
+  - **HALF-OPEN**: Testing recovery, limited traffic allowed
+
+- **Health Monitoring**:
+  - Tracks consecutive failures and error rates
+  - Automatically redirects traffic to healthy regions
+  - Periodically checks health (every 10 seconds)
+  - Self-healing when regions recover
+
+### Chaos Testing
+
+Pulse includes a chaos engine for simulating failure scenarios:
+
+```bash
+go run main.go --chaos
+```
+
+The chaos engine introduces:
+
+- Processing delays
+- Timeouts
+- Connection errors
+- Service unavailability
+
+This helps test the resilience of the circuit breaker and failover system.
+
+## Observability
+
+### Prometheus Metrics
+
+Pulse exposes detailed metrics at the `/metrics` endpoint:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pulse_requests_total` | Counter | Request count by region, MTI, and response code |
+| `pulse_response_latency_seconds` | Histogram | Response time distribution |
+| `pulse_errors_total` | Counter | Error count by region and type |
+| `pulse_region_health` | Gauge | Health status by region (1.0=healthy, 0.0=unhealthy) |
+| `pulse_spanner_write_latency_seconds` | Histogram | Spanner write operation times |
+| `pulse_spanner_read_latency_seconds` | Histogram | Spanner read operation times |
+| `pulse_spanner_errors_total` | Counter | Spanner errors by operation and type |
 
 ### Setting Up Prometheus
 
@@ -159,108 +226,19 @@ scrape_configs:
       - targets: ['localhost:9090']
 ```
 
-3. Start Prometheus and navigate to its web interface
-
-## Circuit Breaker & Failover
-
-Pulse includes an automatic failover system using a circuit breaker pattern:
-
-- When a region fails consecutively (default: 5 times), the circuit opens
-- Traffic is automatically redirected to the failover region specified in the config
-- The circuit remains open for a cooldown period (default: 30 seconds)
-- After cooldown, the circuit enters half-open state to test if the region is healthy again
-- Successful requests close the circuit and restore normal routing
-
-The circuit breaker tracks:
-
-- Consecutive failures
-- Time-windowed error rates
-- Circuit state transitions (CLOSED → OPEN → HALF-OPEN)
-
-Health checks run every 10 seconds (configurable) to maintain up-to-date status of all regions.
-
-## Testing
-
-### Sample Transactions
-
-- US Transaction (approved): `4111111111111111,50.00`
-- US Transaction (declined - over limit): `4111111111111111,550.00`
-- US Transaction (declined - PAN ending in 0): `4111111111111110,50.00`
-- EU Transaction (approved): `5555555555554444,100.00`
-- EU Transaction (declined - over limit): `5555555555554444,450.00`
-
-### Chaos Testing
-
-To enable chaos testing with fault injection:
-
-```
-go run main.go --inject-faults
-```
-
-This will randomly introduce:
-
-- Delays in processing
-- Timeouts
-- Connection errors
-- Service unavailability
-
-Use chaos testing with the metrics dashboard to observe how the circuit breaker and failover mechanisms respond to failures.
-
-## Project Structure
-
-```
-pulse/
-├── main.go                  # Entry point, config load, router start
-├── config/config.yaml       # Configuration including Spanner settings
-├── iso/server.go            # TCP ISO server & message I/O
-├── router/
-│   ├── router.go            # Message translation, routing logic
-│   └── health.go            # Circuit breaker and health monitoring
-├── metrics/
-│   └── metrics.go           # Prometheus metrics definitions
-├── proto/
-│   ├── auth.proto           # Protobuf definitions
-│   └── *.pb.go              # Generated protobuf code
-├── issuer/                  # gRPC issuers for each region
-│   ├── service.go           # Central issuer service with storage integration
-│   ├── us_east.go           # US East issuer implementation
-│   └── eu_west.go           # EU West issuer implementation
-├── storage/
-│   └── storage.go           # Storage interface definitions
-├── span/
-│   ├── spanner.go           # Spanner implementation of storage interface
-│   └── schema.sql           # Spanner database schema
-├── chaos/faults.go          # Simulated chaos injection rules
-└── client/send.go           # CLI to send sample ISO 8583 messages
-```
-
-## License
-
-[MIT License](LICENSE)
-
 ## Spanner Integration
 
-Pulse includes integration with Google Cloud Spanner for transaction persistence and historical lookup capabilities.
+Pulse includes a pluggable storage system with Google Cloud Spanner implementation.
 
-### Features
+### Storage Features
 
-- Persistent storage of all authorization transactions
-- Asynchronous writes to avoid impacting response times
-- Transaction lookup by STAN (System Trace Audit Number)
-- Regional transaction analysis capabilities
-- Comprehensive metrics for database operations
-
-### Configuration
-
-Spanner integration is disabled by default but can be enabled by setting `spanner.enabled: true` in the configuration file. The following settings are required:
-
-- `project_id`: Google Cloud project ID
-- `instance_id`: Spanner instance ID
-- `database_id`: Spanner database ID
+- **Transaction Persistence**: Stores all authorization requests and responses
+- **Asynchronous Writes**: Non-blocking storage to maintain low latency
+- **Historical Lookups**: API to retrieve transaction history by STAN
+- **Regional Analytics**: Support for regional transaction analysis
+- **Metrics**: Comprehensive monitoring of storage operations
 
 ### Database Schema
-
-The Spanner database uses the following schema:
 
 ```sql
 CREATE TABLE Authorizations (
@@ -284,4 +262,50 @@ Transaction history can be retrieved via the gRPC API using the `GetTransaction`
 rpc GetTransaction (GetTransactionRequest) returns (AuthRecord) {}
 ```
 
-This endpoint requires a STAN (System Trace Audit Number) and returns the corresponding transaction record if found.
+## Testing
+
+### Sample Transactions
+
+| Card Number | Amount | Region | Expected Result |
+|-------------|--------|--------|----------------|
+| 4111111111111111 | 50.00 | US East | Approved |
+| 4111111111111111 | 550.00 | US East | Declined (over limit) |
+| 4111111111111110 | 50.00 | US East | Declined (PAN ending in 0) |
+| 5555555555554444 | 100.00 | EU West | Approved |
+| 5555555555554444 | 450.00 | EU West | Declined (over limit) |
+
+## Project Structure
+
+```
+pulse/
+├── main.go                  # Application entry point
+├── config/                  # Configuration files
+│   └── config.yaml          # Main configuration
+├── iso/                     # ISO 8583 message handling
+│   └── server.go            # TCP server implementation
+├── router/                  # Message routing
+│   ├── router.go            # Main routing logic
+│   └── health.go            # Health monitoring
+├── proto/                   # Protocol Buffers
+│   ├── auth.proto           # Service definitions
+│   └── *.pb.go              # Generated code
+├── issuer/                  # Regional processors
+│   ├── service.go           # Service wrapper
+│   ├── us_east.go           # US East implementation
+│   └── eu_west.go           # EU West implementation
+├── storage/                 # Data persistence
+│   └── storage.go           # Storage interface
+├── span/                    # Spanner implementation
+│   ├── spanner.go           # Spanner client
+│   └── schema.sql           # Database schema
+├── metrics/                 # Observability
+│   └── metrics.go           # Prometheus metrics
+├── chaos/                   # Chaos testing
+│   └── faults.go            # Fault injection
+└── client/                  # Test tools
+    └── send.go              # ISO 8583 client
+```
+
+## License
+
+[MIT License](LICENSE)
