@@ -26,43 +26,45 @@ American Express's Global Transaction Router (GTR) sits at the heart of their tr
 
 From my reverse engineering efforts, I've inferred the following architectural comparison:
 
-```
-┌───────────────────────┐       ┌───────────────────────┐
-│  Amex GTR (inferred)  │       │  Pulse (implemented)  │
-└───────────────────────┘       └───────────────────────┘
-                                                        
-  ┌─────────┐                      ┌─────────┐          
-  │ Payment │                      │ Payment │          
-  │Networks │                      │ Client  │          
-  └────┬────┘                      └────┬────┘          
-       │ISO 8583                        │ISO 8583       
-       │over TCP                        │over TCP       
-       ▼                                ▼               
-┌──────────────┐                 ┌──────────────┐       
-│   ISO 8583   │                 │   ISO 8583   │       
-│ TCP Listener │                 │ TCP Server   │       
-└───────┬──────┘                 └───────┬──────┘       
-        │                                │               
-        ▼                                ▼               
-┌──────────────┐                 ┌──────────────┐       
-│    Message   │                 │    Router    │       
-│  Translator  │                 │  ISO→Proto   │       
-└───────┬──────┘                 └───────┬──────┘       
-        │ProtoBuf                       │ProtoBuf      
-        │                                │               
-        ▼                                ▼               
-┌──────────────┐                 ┌──────────────┐       
-│   Regional   │                 │   Regional   │       
-│   Routing    │                 │   Routing    │       
-└───────┬──────┘                 └───────┬──────┘       
-        │                                │               
-        ├─────────┬─────────┐            ├─────────┬─────────┐
-        │         │         │            │         │         │
-        ▼         ▼         ▼            ▼         ▼         ▼
-  ┌──────────┐┌──────────┐┌──────────┐  ┌──────────┐┌──────────┐┌──────────┐
-  │ US East  ││ EU West  ││ Asia Pac │  │ US East  ││ EU West  ││  Other   │
-  │ Processor││ Processor││ Processor│  │ Processor││ Processor││ Processor│
-  └──────────┘└──────────┘└──────────┘  └──────────┘└──────────┘└──────────┘
+```mermaid
+graph TD
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    classDef processor fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    
+    subgraph AmexGTR["Amex GTR (inferred)"]
+        A1[Payment Networks] -.ISO 8583<br>over TCP.-> A2
+        A2[ISO 8583 TCP Listener] --> A3
+        A3[Message Translator] --> A4
+        A4[Regional Routing] --> A5
+        A4 --> A6
+        A4 --> A7
+        
+        A5[US East Processor]
+        A6[EU West Processor]
+        A7[Asia Pac Processor]
+        
+        class A1 external
+        class A2,A3,A4 internal
+        class A5,A6,A7 processor
+    end
+    
+    subgraph PulseImpl["Pulse (implemented)"]
+        B1[Payment Client] -.ISO 8583<br>over TCP.-> B2
+        B2[ISO 8583 TCP Server] --> B3
+        B3[Router ISO→Proto] --> B4
+        B4[Regional Routing] --> B5
+        B4 --> B6
+        B4 --> B7
+        
+        B5[US East Processor]
+        B6[EU West Processor]
+        B7[Other Processor]
+        
+        class B1 external
+        class B2,B3,B4 internal
+        class B5,B6,B7 processor
+    end
 ```
 
 ## Rebuilding the Router: The Pulse Project
@@ -71,17 +73,21 @@ My reimplementation—named "Pulse"—follows the core architectural principles 
 
 Here's the high-level transaction flow I reversed-engineered:
 
-```
-┌──────────┐     ┌───────────┐     ┌───────────┐     ┌───────────┐     ┌──────────┐
-│  Client  │     │  ISO8583  │     │  Router   │     │ Regional  │     │  Client  │
-│  (Bank)  │────▶│   Server  │────▶│ (Protocol │────▶│ Processor │────▶│  (Bank)  │
-│          │     │           │     │Transform) │     │ (gRPC)    │     │          │
-└──────────┘     └───────────┘     └───────────┘     └───────────┘     └──────────┘
-      │                                                                      ▲
-      │                                                                      │
-      │                                                                      │
-      └──────────────────────────────────────────────────────────────────────┘
-                              ISO 8583 Messages
+```mermaid
+sequenceDiagram
+    participant Client as Client (Bank)
+    participant Server as ISO8583 Server
+    participant Router as Router (Protocol Transform)
+    participant Processor as Regional Processor (gRPC)
+    
+    Client->>Server: ISO 8583 request over TCP
+    Server->>Router: Internal message
+    Router->>Processor: gRPC call with Protocol Buffers
+    Processor-->>Router: gRPC response
+    Router-->>Server: Internal response
+    Server-->>Client: ISO 8583 response over TCP
+    
+    note over Client,Client: Persistent TCP connection maintained
 ```
 
 I studied how Amex likely handles each stage of this process, then implemented my interpretation:
@@ -264,18 +270,21 @@ One of the most critical aspects I had to reverse engineer was how Amex handles 
 
 Pulse implements this pattern with a state machine approach:
 
-```go
-// Circuit state diagram:
-//
-// ┌─────────────┐  5+ failures   ┌────────────┐  30s timeout  ┌─────────────┐
-// │   CLOSED    │───────────────▶│    OPEN    │──────────────▶│  HALF-OPEN  │
-// │ (normal op) │                │ (no traffic)│               │ (test mode) │
-// └─────────────┘                └────────────┘               └──────┬──────┘
-//        ▲                                                           │
-//        │                                                           │
-//        └───────────────────────────────────────────────────────────┘
-//                                  Success
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    
+    CLOSED --> OPEN: 5+ consecutive failures
+    OPEN --> HALF_OPEN: 30s timeout
+    HALF_OPEN --> CLOSED: Success
+    HALF_OPEN --> OPEN: Failure
+    
+    note right of CLOSED: Normal operation\nAll requests processed
+    note right of OPEN: Circuit broken\nRequests redirected to failover
+    note right of HALF_OPEN: Testing recovery\nLimited traffic allowed
+```
 
+```go
 // RecordFailure records a failed request to the region
 func (rh *RegionHealth) RecordFailure() {
     rh.mutex.Lock()
@@ -394,6 +403,128 @@ func NewMetrics() *Metrics {
 
 These metrics provide real-time insights into system performance, error rates, and regional health—essential for a system where downtime means lost revenue.
 
+## Persistent Storage: Our Approach vs. Amex's
+
+One critical aspect of any payment routing system is persistent storage of transaction data. While Amex's system likely uses specialized databases and extensive caching strategies for transaction persistence, we implemented a more cloud-native approach with Google Cloud Spanner.
+
+### The Amex Approach (Inferred)
+
+Based on our research, Amex maintains transaction data with a careful balance of regional data locality and global consistency:
+
+```mermaid
+graph TD
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
+    
+    A1[Payment Networks] --> A2[GTR]
+    A2 --> A3[Regional Processor]
+    A3 -->|Cache local data| A4[Regional Data Store]
+    A3 -->|Sync critical data| A5[Central Transaction Database]
+    
+    class A1 external
+    class A2,A3 internal
+    class A4,A5 storage
+```
+
+Amex appears to use a hybrid approach to data storage:
+
+1. **Regional Caching**: Each region maintains local caching mechanisms to access frequently needed data without cross-region calls. This follows their principle of keeping transactions localized by design.
+
+2. **Data Locality**: Their architecture emphasizes keeping data close to where it's processed, with patterns designed to minimize data transfer between regions.
+
+3. **Replicated Storage**: Critical transaction data is eventually synchronized across regions to maintain global consistency while preserving performance.
+
+### Our Implementation with Spanner
+
+For our Pulse project, we chose Google Cloud Spanner as our persistent storage solution, implementing it as a pluggable storage interface:
+
+```mermaid
+graph TD
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    
+    B1[Payment Client] --> B2[ISO 8583 Server]
+    B2 --> B3[Router]
+    B3 --> B4[US East Processor]
+    B3 --> B5[EU West Processor]
+    B3 -.->|Async Store| B6[Spanner]
+    B4 -.->|Query| B6
+    B5 -.->|Query| B6
+    
+    class B1 external
+    class B2,B3,B4,B5 internal
+    class B6 storage
+```
+
+Key aspects of our design include:
+
+1. **Abstraction Through Interface**: We implemented a clean `Storage` interface that can be fulfilled by different storage providers, making our system adaptable to various persistence technologies.
+
+```go
+// Storage defines the interface for persistence operations
+type Storage interface {
+    // SaveAuthorization persists the authorization request and result
+    SaveAuthorization(ctx context.Context, auth *proto.AuthRequest, region string, approved bool) error
+
+    // GetTransaction retrieves a transaction by STAN
+    GetTransaction(ctx context.Context, stan string) (*proto.AuthRecord, error)
+
+    // Close closes the storage connection
+    Close() error
+}
+```
+
+2. **Asynchronous Storage**: Unlike traditional systems that block on database operations, our implementation stores transactions asynchronously to avoid impacting response time:
+
+```go
+// Record the transaction in storage
+if r.storage != nil {
+    storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    
+    // Determine if approved based on response code
+    approved := resp.ResponseCode == "00"
+    
+    // Save to storage asynchronously to avoid impacting response time
+    go func() {
+        if err := r.storage.SaveAuthorization(storeCtx, req, region, approved); err != nil {
+            log.Printf("Failed to store authorization: %v", err)
+        }
+    }()
+}
+```
+
+3. **Comprehensive Metrics**: Our implementation includes detailed metrics for monitoring storage performance:
+
+```go
+writeLatency := promauto.NewHistogramVec(
+    prometheus.HistogramOpts{
+        Name:    "pulse_spanner_write_latency_seconds",
+        Help:    "Spanner write latency distribution in seconds",
+        Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to ~1s
+    },
+    []string{"operation"},
+)
+```
+
+4. **Global Consistency**: Unlike Amex's likely region-specific approach, Spanner provides global consistency across regions without requiring custom synchronization logic, simplifying our implementation while maintaining strict consistency.
+
+### Key Differences and Trade-offs
+
+The primary differences between our approach and Amex's inferred approach highlight interesting trade-offs:
+
+1. **Managed vs. Custom**: By using Spanner, we leverage a fully managed database service, while Amex likely has more customized solutions tailored to their specific performance needs.
+
+2. **Global vs. Regional**: Spanner offers global consistency by default, which simplifies our architecture. Amex likely uses a more complex tiered storage approach with local caching and global synchronization to optimize for both latency and consistency.
+
+3. **Simplicity vs. Optimization**: Our design favors simplicity and developer productivity, while Amex's approach is likely more optimized for their specific workload patterns and extreme performance requirements.
+
+4. **Asynchronous Consistency**: Both approaches use asynchronous storage to avoid impacting response times, but differ in how they manage eventual consistency. Our Spanner implementation provides stronger consistency guarantees with less custom code.
+
+By implementing transaction storage with Spanner, we've created a system that preserves the core principles of Amex's design (asynchronous storage, high performance) while leveraging cloud-native technologies to simplify implementation and maintenance.
+
 ## Why Go?
 
 Through my reverse engineering efforts, I deduced several reasons why Amex chose Go for their reimplementation. I followed the same path for Pulse:
@@ -408,11 +539,20 @@ Through my reverse engineering efforts, I deduced several reasons why Amex chose
 
 The transaction flow in Pulse mirrors what I reverse engineered from Amex's system:
 
-```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│  ISO8583  │    │ Protocol │    │   gRPC   │    │ Protocol │    │  ISO8583  │
-│ TCP Input │───▶│  Buffer  │───▶│  Routing │───▶│  Buffer  │───▶│ TCP Output │
-└──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
+```mermaid
+flowchart LR
+    classDef iso fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
+    classDef proto fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef grpc fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    
+    A[ISO8583<br>TCP Input] --> B[Protocol<br>Buffer]
+    B --> C[gRPC<br>Routing]
+    C --> D[Protocol<br>Buffer]
+    D --> E[ISO8583<br>TCP Output]
+    
+    class A,E iso
+    class B,D proto
+    class C grpc
 ```
 
 1. ISO 8583 message arrives via TCP

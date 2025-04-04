@@ -13,6 +13,7 @@ Pulse is a simplified prototype of a Global Transaction Router inspired by Ameri
 - **Multi-Region Observability** with Prometheus metrics
 - **Automatic Failover** between regions with circuit breaker logic
 - **Health Monitoring** for regional systems
+- **Spanner Integration** for transaction persistence and historical lookups
 
 ## Architecture
 
@@ -24,6 +25,7 @@ Pulse consists of the following components:
 4. **Chaos Engine**: Optional component for injecting faults and simulating issues
 5. **Health Monitor**: Tracks and reports regional service health status
 6. **Metrics Endpoint**: Exposes Prometheus metrics for observability
+7. **Storage Layer**: Integration with Google Cloud Spanner for transaction persistence
 
 ## Getting Started
 
@@ -51,7 +53,7 @@ Pulse consists of the following components:
 3. Generate gRPC code from protobuf:
 
    ```
-   protoc --go_out=. --go-grpc_out=. proto/auth.proto
+   protoc --go_out=. --go-grpc_out=. *.proto
    ```
 
 ### Running the Server
@@ -88,40 +90,48 @@ This allows you to send test transactions with different PAN/amount combinations
 
 ## Configuration
 
-The routing configuration is stored in `config/routes.yaml` and defines:
+The configuration is stored in `config/config.yaml` and defines:
 
 - BIN-to-region routing rules
 - Regional service configurations
 - Failover configuration
 - Chaos testing settings
+- Spanner database configuration
 
 Example:
 
 ```yaml
-bin_routes:
-  "4000-4999": "us-east"
-  "5000-5999": "eu-west"
-default_region: "us-east"
+router:
+  bin_routes:
+    "4000-4999": "us-east"
+    "5000-5999": "eu-west"
+  default_region: "us-east"
 
-regions:
-  us-east:
-    host: "localhost"
-    port: 50051
-    timeout_ms: 5000
-  eu-west:
-    host: "localhost"
-    port: 50052
-    timeout_ms: 8000
+  regions:
+    us-east:
+      host: "localhost"
+      port: 50051
+      timeout_ms: 5000
+    eu-west:
+      host: "localhost"
+      port: 50052
+      timeout_ms: 8000
 
-# Failover configuration mapping primary regions to fallback regions
-failover_map:
-  "us-east": "eu-west"
-  "eu-west": "us-east"
+  # Failover configuration mapping primary regions to fallback regions
+  failover_map:
+    "us-east": "eu-west"
+    "eu-west": "us-east"
 
 chaos:
   enabled: false
   fault_probability: 0.1
   max_delay_ms: 1000
+
+spanner:
+  enabled: false
+  project_id: "pulse-project"
+  instance_id: "pulse-instance"
+  database_id: "pulse-db"
 ```
 
 ## Observability & Metrics
@@ -132,6 +142,9 @@ Pulse exposes Prometheus metrics at the `/metrics` endpoint that can be scraped 
 - **pulse_response_latency_seconds**: Histogram of response latencies by region and MTI
 - **pulse_errors_total**: Count of errors with labels for region and error type
 - **pulse_region_health**: Gauge showing health status by region (1.0 = healthy, 0.0 = unhealthy)
+- **pulse_spanner_write_latency_seconds**: Histogram of Spanner write latencies
+- **pulse_spanner_read_latency_seconds**: Histogram of Spanner read latencies
+- **pulse_spanner_errors_total**: Count of Spanner errors by operation and error type
 
 ### Setting Up Prometheus
 
@@ -198,19 +211,77 @@ Use chaos testing with the metrics dashboard to observe how the circuit breaker 
 ```
 pulse/
 ├── main.go                  # Entry point, config load, router start
-├── config/routes.yaml       # BIN-to-region routing configuration
+├── config/config.yaml       # Configuration including Spanner settings
 ├── iso/server.go            # TCP ISO server & message I/O
 ├── router/
 │   ├── router.go            # Message translation, routing logic
 │   └── health.go            # Circuit breaker and health monitoring
 ├── metrics/
 │   └── metrics.go           # Prometheus metrics definitions
-├── proto/auth.proto         # Protobuf definitions
+├── proto/
+│   ├── auth.proto           # Protobuf definitions
+│   └── *.pb.go              # Generated protobuf code
 ├── issuer/                  # gRPC issuers for each region
+│   ├── service.go           # Central issuer service with storage integration
+│   ├── us_east.go           # US East issuer implementation
+│   └── eu_west.go           # EU West issuer implementation
+├── storage/
+│   └── storage.go           # Storage interface definitions
+├── span/
+│   ├── spanner.go           # Spanner implementation of storage interface
+│   └── schema.sql           # Spanner database schema
 ├── chaos/faults.go          # Simulated chaos injection rules
-├── client/send.go           # CLI to send sample ISO 8583 messages
+└── client/send.go           # CLI to send sample ISO 8583 messages
 ```
 
 ## License
 
 [MIT License](LICENSE)
+
+## Spanner Integration
+
+Pulse includes integration with Google Cloud Spanner for transaction persistence and historical lookup capabilities.
+
+### Features
+
+- Persistent storage of all authorization transactions
+- Asynchronous writes to avoid impacting response times
+- Transaction lookup by STAN (System Trace Audit Number)
+- Regional transaction analysis capabilities
+- Comprehensive metrics for database operations
+
+### Configuration
+
+Spanner integration is disabled by default but can be enabled by setting `spanner.enabled: true` in the configuration file. The following settings are required:
+
+- `project_id`: Google Cloud project ID
+- `instance_id`: Spanner instance ID
+- `database_id`: Spanner database ID
+
+### Database Schema
+
+The Spanner database uses the following schema:
+
+```sql
+CREATE TABLE Authorizations (
+  Stan STRING(12) NOT NULL,
+  Pan STRING(19) NOT NULL,
+  Amount FLOAT64 NOT NULL,
+  Region STRING(50) NOT NULL,
+  Approved BOOL NOT NULL,
+  TransmissionTime TIMESTAMP NOT NULL,
+  InsertedAt TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+) PRIMARY KEY (Stan);
+```
+
+Indexes are created for efficient querying by region, approval status, and PAN.
+
+### API Access
+
+Transaction history can be retrieved via the gRPC API using the `GetTransaction` endpoint:
+
+```protobuf
+rpc GetTransaction (GetTransactionRequest) returns (AuthRecord) {}
+```
+
+This endpoint requires a STAN (System Trace Audit Number) and returns the corresponding transaction record if found.
