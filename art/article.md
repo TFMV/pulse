@@ -1,172 +1,67 @@
-# Reverse Engineering Amex's Global Transaction Router: Lessons from Rebuilding It in Go
+# From Legacy to Innovation: Reimagining Payment Infrastructure with Pulse
 
-How do you modernize a payment system without touching the 40-year-old protocol it's built on?
+How do you build a modern payment routing system while respecting the constraints of decades-old financial protocols? This was the challenge I set for myself when creating **Pulse**, an open-source payment transaction router designed for modern cloud environments while maintaining compatibility with traditional banking systems.
 
-This was the challenge facing American Express when they needed to replace their aging C/C++ transaction routing infrastructure. Financial transactions require five-nines reliability while maintaining millisecond response times—all with zero tolerance for errors. The twist? They had to maintain compatibility with ISO 8583, a banking message standard created when Reagan was president.
+Rather than reverse-engineering existing systems, I wanted to create something that honored the lessons of established payment networks while incorporating cutting-edge architectural patterns. The result is a system that bridges the gap between legacy and innovation—demonstrating how financial technology can evolve without breaking compatibility.
 
-What intrigued me most about Amex's solution—a Go-based system using gRPC internally while preserving ISO 8583 externally—was the elegant boundary they drew between legacy and modern components. I wanted to understand how the pieces fit together, what tradeoffs they made, and how they achieved reliability at scale. So I did what any curious engineer would do: I reverse engineered it.
+## The Payment Industry's Technical Challenges
 
-With no access to Amex's source code, I began my technical expedition to reconstruct their architecture from public information. The result is Pulse—my interpretation of what powers millions of credit card transactions each day.
+Financial transaction processing presents unique engineering challenges:
 
-## The Amex Global Transaction Router Architecture
+1. **Ultra-Low Latency Requirements**: Card authorizations must complete in milliseconds—consumers and merchants won't tolerate delays.
+2. **Five-Nines Reliability**: Payment systems must achieve 99.999% uptime, as even brief outages can cost millions.
+3. **Legacy Protocol Compatibility**: The financial industry relies on ISO 8583, a message standard from the 1980s that remains the backbone of card transactions worldwide.
+4. **Variable Traffic Patterns**: Systems must handle enormous traffic spikes during events like Black Friday while remaining cost-effective during slower periods.
+5. **Global Distribution**: Modern payment networks must route transactions optimally across continents while maintaining consistent behavior.
 
-American Express's Global Transaction Router (GTR) sits at the heart of their transaction processing infrastructure. Based on published articles and tech talks, I pieced together that it's a fascinating blend of legacy protocols with modern architectural patterns:
+Major card networks tackle these challenges with sophisticated architectures combining high-throughput message processing, geographic distribution, and fault tolerance. While the implementation details of these systems are proprietary, their architectural patterns provide valuable inspiration.
 
-1. **Persistent TCP Sessions**: Unlike RESTful architectures, Amex maintains persistent TCP connections with acquiring banks and processors to maximize throughput and minimize handshake overhead.
+## Pulse: Inspired by Industry, Designed for the Cloud
 
-2. **ISO 8583 Translation**: The router accepts the banking industry's workhorse protocol (ISO 8583) and transforms it to more efficient internal representations.
-
-3. **Internal gRPC Communication**: While external communications use ISO 8583, internally the system speaks gRPC with Protocol Buffers for serialization.
-
-4. **Geographic Routing**: Transactions are routed to different processing centers based on card BIN ranges and regional processing rules.
-
-5. **Fault Tolerance**: Circuit breakers, automatic failover, and sophisticated monitoring ensure the system maintains reliability even during partial outages.
-
-## The Architecture: Amex vs. Pulse
-
-From my reverse engineering efforts, I've inferred the following architectural comparison:
+Pulse draws inspiration from modern payment networks while embracing cloud-native principles and adding my own architectural innovations. Here's how it compares to traditional payment systems and where it introduces unique features:
 
 ```mermaid
 graph TD
     classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
     classDef processor fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
+    classDef workflow fill:#fff9c4,stroke:#827717,stroke-width:2px
     
-    subgraph AmexGTR["Amex GTR (inferred)"]
-        A1[Payment Networks] -.ISO 8583<br>over TCP.-> A2
-        A2[ISO 8583 TCP Listener] --> A3
-        A3[Message Translator] --> A4
-        A4[Regional Routing] --> A5
-        A4 --> A6
-        A4 --> A7
-        
-        A5[US East Processor]
-        A6[EU West Processor]
-        A7[Asia Pac Processor]
-        
-        class A1 external
-        class A2,A3,A4 internal
-        class A5,A6,A7 processor
-    end
+    A1[Payment Client] -.ISO 8583<br>over TCP.-> A2
+    A2[ISO 8583 Server] --> A3
+    A3[Router ISO→Proto] --> A8
+    A8[Temporal Workflow] --> A4
+    A4[Regional Routing] --> A5
+    A4 --> A6
+    A5[US East Processor]
+    A6[EU West Processor]
+    A8 -.->|Fraud Checks| A9[Fraud Analysis]
+    A8 -.->|Audit| A10[Audit Logger]
+    A3 -.->|Async Storage| A7[Spanner]
     
-    subgraph PulseImpl["Pulse (implemented)"]
-        B1[Payment Client] -.ISO 8583<br>over TCP.-> B2
-        B2[ISO 8583 TCP Server] --> B3
-        B3[Router ISO→Proto] --> B4
-        B4[Regional Routing] --> B5
-        B4 --> B6
-        B4 --> B7
-        
-        B5[US East Processor]
-        B6[EU West Processor]
-        B7[Other Processor]
-        
-        class B1 external
-        class B2,B3,B4 internal
-        class B5,B6,B7 processor
-    end
+    class A1 external
+    class A2,A3,A4 internal
+    class A5,A6 processor
+    class A7 storage
+    class A8,A9,A10 workflow
 ```
 
-## Rebuilding the Router: The Pulse Project
+### Key Design Principles
 
-My reimplementation—named "Pulse"—follows the core architectural principles I inferred from Amex's system while being simple enough to understand in a single sitting. Like Amex's GTR, Pulse maintains a clean separation between external protocols and internal communication.
+#### 1. Protocol Boundaries as First-Class Concerns
 
-Here's the high-level transaction flow I reversed-engineered:
-
-```mermaid
-sequenceDiagram
-    participant Client as Client (Bank)
-    participant Server as ISO8583 Server
-    participant Router as Router (Protocol Transform)
-    participant Processor as Regional Processor (gRPC)
-    
-    Client->>Server: ISO 8583 request over TCP
-    Server->>Router: Internal message
-    Router->>Processor: gRPC call with Protocol Buffers
-    Processor-->>Router: gRPC response
-    Router-->>Server: Internal response
-    Server-->>Client: ISO 8583 response over TCP
-    
-    note over Client,Client: Persistent TCP connection maintained
-```
-
-I studied how Amex likely handles each stage of this process, then implemented my interpretation:
-
-1. **ISO 8583 TCP Server**: Listens for incoming financial transactions from client systems.
-2. **Message Router**: Converts ISO 8583 messages to Protocol Buffers and routes them to appropriate regional processors.
-3. **Regional Processors**: gRPC services that implement the authorization logic for different regions.
-4. **Health Monitor**: Tracks the health of regional services and implements circuit breaking.
-5. **Metrics System**: Exposes Prometheus metrics for observability.
-
-Let's look at how these components implement the key aspects of Amex's architecture based on what I could deduce from public information.
-
-### ISO 8583 TCP Server: Handling Financial Messages
-
-The ISO 8583 standard, despite being created in the 1980s, remains the lingua franca of financial transaction processing. Reverse engineering how Amex likely handles these messages, I implemented a TCP server that accepts ISO 8583 messages using the `moov-io/iso8583` package:
-
-```go
-// Server represents the ISO8583 TCP server
-type Server struct {
-    address     string
-    handler     MessageHandler
-    listener    net.Listener
-    isShutdown  bool
-    connections map[string]net.Conn
-    spec        *iso8583.MessageSpec
-}
-
-// Start starts the ISO8583 TCP server
-func (s *Server) Start() error {
-    var err error
-    s.listener, err = net.Listen("tcp", s.address)
-    if err != nil {
-        return fmt.Errorf("failed to start TCP server: %w", err)
-    }
-
-    log.Printf("ISO8583 server listening on %s", s.address)
-
-    for !s.isShutdown {
-        conn, err := s.listener.Accept()
-        if err != nil {
-            if s.isShutdown {
-                return nil
-            }
-            log.Printf("Error accepting connection: %v", err)
-            continue
-        }
-
-        clientAddr := conn.RemoteAddr().String()
-        s.connections[clientAddr] = conn
-        log.Printf("New connection from %s", clientAddr)
-
-        go s.handleConnection(conn)
-    }
-
-    return nil
-}
-```
-
-I inferred that Amex maintains persistent TCP connections, as this is crucial for transaction processing because:
-
-1. It eliminates the overhead of TCP handshakes for each transaction
-2. It allows for higher throughput with lower latency
-3. It enables session-based security models common in financial networks
-
-### Protocol Transformation: ISO 8583 to Protocol Buffers
-
-One of the most fascinating aspects I reverse engineered from Amex's architecture is the transformation from ISO 8583 messages to Protocol Buffers. This boundary between old and new is the key innovation that enabled their modernization.
-
-Pulse implements this transformation boundary:
+While traditional payment systems often blend protocols throughout their codebase, Pulse establishes clear boundaries between different communication formats:
 
 ```go
 // isoToAuthRequest converts an ISO8583 message to an AuthRequest
 func (r *Router) isoToAuthRequest(message *iso8583.Message) (*proto.AuthRequest, error) {
-    // Get required fields from ISO message
     mti, err := message.GetString(0)
     if err != nil {
-        return nil, fmt.Errorf("failed to get MTI: %w", err)
+        return nil, err
     }
 
+    // Retrieve required fields
     pan, err := message.GetString(2)
     if err != nil {
         return nil, fmt.Errorf("failed to get PAN: %w", err)
@@ -187,7 +82,6 @@ func (r *Router) isoToAuthRequest(message *iso8583.Message) (*proto.AuthRequest,
         return nil, fmt.Errorf("failed to get STAN: %w", err)
     }
 
-    // Create an AuthRequest (Protocol Buffers)
     return &proto.AuthRequest{
         Mti:              mti,
         Pan:              pan,
@@ -198,17 +92,11 @@ func (r *Router) isoToAuthRequest(message *iso8583.Message) (*proto.AuthRequest,
 }
 ```
 
-This transformation provides several benefits that I believe drove Amex's design decisions:
+This clean separation between the ISO 8583 external interface and internal protocol buffers makes the system more maintainable, testable, and adaptable to future protocol changes.
 
-1. **Efficiency**: Protocol Buffers are more compact and faster to serialize/deserialize than ISO 8583
-2. **Type Safety**: gRPC provides strong typing, whereas ISO 8583 is more loosely typed
-3. **Evolution**: Internal APIs can evolve without changing the external interface
+#### 2. Multi-Region Routing with Smart Failover
 
-### BIN-based Geographic Routing
-
-A key feature I deduced from Amex's system is its ability to route transactions to different regional processors based on card BIN (Bank Identification Number) ranges. This geographic routing optimizes latency by processing transactions closer to the customer.
-
-Pulse implements a similar routing mechanism based on my reverse engineering:
+Pulse implements sophisticated geographic routing based on card BIN (Bank Identification Number) ranges, with automatic failover between regions:
 
 ```go
 // determineRegion determines the appropriate region based on the PAN's BIN
@@ -255,20 +143,20 @@ func (r *Router) determineRegion(pan string) string {
 }
 ```
 
-The routing is configured through a YAML file, making it easy to update routing rules without recompiling the application:
+This routing can be configured through a simple YAML file:
 
 ```yaml
 bin_routes:
-  "4000-4999": "us-east"
-  "5000-5999": "eu-west"
-default_region: "us-east"
+  "4": "us_east"       # Visa cards to US East
+  "51": "eu_west"      # European Mastercard to EU West
+  "34": "us_east"      # Amex to US East
+  "35": "eu_west"      # JCB to EU West
+  "400000-499999": "us_east"  # Range example
 ```
 
-### Fault Tolerance with Circuit Breakers
+#### 3. Circuit Breakers for Regional Health
 
-One of the most critical aspects I had to reverse engineer was how Amex handles fault tolerance. Based on their tech talks, I inferred they use circuit breakers to prevent cascading failures when regional processors experience issues.
-
-Pulse implements this pattern with a state machine approach:
+Pulse includes a sophisticated circuit-breaker implementation that monitors regional health and automatically redirects traffic when issues are detected:
 
 ```mermaid
 stateDiagram-v2
@@ -282,36 +170,6 @@ stateDiagram-v2
     note right of CLOSED: Normal operation\nAll requests processed
     note right of OPEN: Circuit broken\nRequests redirected to failover
     note right of HALF_OPEN: Testing recovery\nLimited traffic allowed
-```
-
-```go
-// RecordFailure records a failed request to the region
-func (rh *RegionHealth) RecordFailure() {
-    rh.mutex.Lock()
-    defer rh.mutex.Unlock()
-
-    // Increment consecutive failures
-    rh.ConsecutiveFailures++
-
-    // Add to recent errors
-    now := time.Now()
-    rh.RecentErrors = append(rh.RecentErrors, now)
-
-    // Clean up old errors outside the window
-    var recentErrors []time.Time
-    for _, t := range rh.RecentErrors {
-        if now.Sub(t) <= ErrorWindow {
-            recentErrors = append(recentErrors, t)
-        }
-    }
-    rh.RecentErrors = recentErrors
-
-    // Check if we need to open the circuit
-    if rh.State == CircuitClosed && rh.ConsecutiveFailures >= FailureThreshold {
-        rh.State = CircuitOpen
-        rh.LastStateChange = now
-    }
-}
 ```
 
 When a circuit "opens" due to consecutive failures, traffic is automatically rerouted to a healthy region:
@@ -343,9 +201,145 @@ if !primaryHealthy {
 }
 ```
 
-### Observability with Prometheus
+## Key Innovations in Pulse
 
-I inferred from public information that Amex must have comprehensive monitoring. Pulse implements modern observability using Prometheus metrics:
+While drawing inspiration from established payment networks, Pulse introduces several unique innovations:
+
+### 1. Workflow Orchestration with Temporal
+
+Unlike traditional payment routers that process transactions in a stateless manner, Pulse integrates [Temporal](https://temporal.io/) for durable, fault-tolerant workflow orchestration:
+
+```mermaid
+stateDiagram-v2
+    [*] --> StartWorkflow
+    StartWorkflow --> FraudCheck: 1. Analyze Transaction
+    FraudCheck --> Declined: Fraud Detected
+    FraudCheck --> ProcessPayment: Clean Transaction
+    ProcessPayment --> Approved: Success
+    ProcessPayment --> Retry: Temporary Failure
+    Retry --> ProcessPayment: Retry (max 3)
+    Retry --> Declined: Max Retries Exceeded
+    Approved --> AuditLog
+    Declined --> AuditLog
+    AuditLog --> [*]
+```
+
+This workflow-based approach enables:
+
+- **Complex Multi-Step Transactions**: Beyond simple authorizations, Pulse can orchestrate complex payment flows that span multiple services.
+- **Durable Execution**: Workflows persist their state, allowing transactions to survive process crashes and continue execution from the point of failure.
+- **Transparent Retries**: Failed operations are automatically retried with configurable backoff.
+
+The implementation leverages Temporal's programming model:
+
+```go
+// Execute runs the payment transaction workflow
+func (w *PaymentWorkflow) Execute(ctx workflow.Context, request *proto.AuthRequest) (*proto.AuthResponse, error) {
+    logger := workflow.GetLogger(ctx)
+    logger.Info("Starting transaction workflow", "stan", request.Stan, "pan_prefix", request.Pan[:6])
+
+    // Setup workflow options
+    options := w.defaultOptions
+    retryPolicy := &temporal.RetryPolicy{
+        InitialInterval:    options.RetryInterval,
+        BackoffCoefficient: 1.5,
+        MaximumInterval:    options.RetryInterval * 10,
+        MaximumAttempts:    int32(options.MaxRetries),
+    }
+
+    // Step 1: Run fraud check if enabled
+    if options.EnableFraudCheck {
+        var fraudCheckResult bool
+        fraudCheckCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+            StartToCloseTimeout: options.FraudCheckTimeout,
+            RetryPolicy:         retryPolicy,
+        })
+
+        logger.Info("Executing fraud check activity", "stan", request.Stan)
+        err := workflow.ExecuteActivity(fraudCheckCtx, "CheckTransaction", request).Get(ctx, &fraudCheckResult)
+        if err != nil {
+            logger.Error("Fraud check failed", "error", err)
+            // Continue with the transaction but flag that fraud check failed
+        } else if !fraudCheckResult {
+            logger.Info("Transaction rejected by fraud check", "stan", request.Stan)
+            // Create a declined response for fraud
+            response := &proto.AuthResponse{
+                Mti:              getResponseMTI(request.Mti),
+                ResponseCode:     "59", // Fraud suspicion response code
+            }
+            return response, nil
+        }
+    }
+
+    // Step 2: Process the authorization with retries
+    var response *proto.AuthResponse
+    authCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+        StartToCloseTimeout: 10 * time.Second,
+        RetryPolicy:         retryPolicy,
+    })
+
+    // ... additional workflow logic ...
+
+    return response, nil
+}
+```
+
+### 2. Real-Time Fraud Detection
+
+Pulse includes a built-in fraud detection system that analyzes transactions in real-time:
+
+```go
+// Analyze performs fraud analysis on a transaction request
+func (f *SimpleFraudAnalyzer) Analyze(request *proto.AuthRequest) (bool, string, error) {
+    // Extract PAN prefix (BIN)
+    cardBin := ""
+    if len(request.Pan) >= 6 {
+        cardBin = request.Pan[:6]
+    }
+
+    // Parse amount
+    amountStr := strings.TrimSpace(request.Amount)
+    amount, err := strconv.ParseFloat(amountStr, 64)
+    if err != nil {
+        return false, "Invalid amount format", err
+    }
+
+    // Check if BIN is in high-risk list
+    for _, highRiskBin := range f.highRiskBins {
+        if cardBin == highRiskBin && amount > f.amountThreshold/2 {
+            reason := fmt.Sprintf("High-risk BIN %s with amount $%.2f", maskBin(cardBin), amount)
+            return false, reason, nil
+        }
+    }
+
+    // Check for high amount
+    if amount > f.amountThreshold {
+        // Allow, but with a note
+        reason := fmt.Sprintf("High amount $%.2f requires additional verification", amount)
+        return true, reason, nil
+    }
+
+    // Check velocity (multiple transactions in short time)
+    if f.checkVelocity(request.Pan) {
+        reason := fmt.Sprintf("Velocity check failed: too many transactions for PAN %s", maskPAN(request.Pan))
+        return false, reason, nil
+    }
+
+    // No fraud detected
+    return true, "Transaction passed fraud checks", nil
+}
+```
+
+This fraud detection system includes:
+
+1. **BIN Risk Analysis**: Risk assessment based on card BIN ranges
+2. **Velocity Checks**: Detection of unusual transaction frequency
+3. **Amount Thresholds**: Flagging of high-value transactions
+4. **Configurable Rules**: Extensible rules engine for custom checks
+
+### 3. Comprehensive Observability
+
+Pulse implements a modern observability stack using Prometheus metrics, comprehensive logging, and detailed tracing:
 
 ```go
 // Metrics holds all the Prometheus metrics for the application
@@ -354,267 +348,104 @@ type Metrics struct {
     ResponseLatency    *prometheus.HistogramVec
     ErrorCount         *prometheus.CounterVec
     RegionHealthStatus *prometheus.GaugeVec
-}
-
-// NewMetrics creates and registers all metrics
-func NewMetrics() *Metrics {
-    m := &Metrics{
-        // Track request count by region, transaction type (MTI), and response code
-        RequestCount: promauto.NewCounterVec(
-            prometheus.CounterOpts{
-                Name: "pulse_requests_total",
-                Help: "The total number of processed ISO8583 requests",
-            },
-            []string{"region", "mti", "response_code"},
-        ),
-
-        // Track response latency by region
-        ResponseLatency: promauto.NewHistogramVec(
-            prometheus.HistogramOpts{
-                Name:    "pulse_response_latency_seconds",
-                Help:    "Response latency distribution in seconds",
-                Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // From 1ms to ~1s
-            },
-            []string{"region", "mti"},
-        ),
-
-        // Track error count by region and type
-        ErrorCount: promauto.NewCounterVec(
-            prometheus.CounterOpts{
-                Name: "pulse_errors_total",
-                Help: "The total number of errors encountered",
-            },
-            []string{"region", "error_type"},
-        ),
-
-        // Track region health status (1 = healthy, 0 = unhealthy)
-        RegionHealthStatus: promauto.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "pulse_region_health",
-                Help: "Health status of each region (1 = healthy, 0 = unhealthy)",
-            },
-            []string{"region"},
-        ),
-    }
-
-    return m
+    WorkflowLatency    *prometheus.HistogramVec
+    FraudCheckResults  *prometheus.CounterVec
 }
 ```
 
-These metrics provide real-time insights into system performance, error rates, and regional health—essential for a system where downtime means lost revenue.
+This observability model provides real-time insights into:
 
-## Persistent Storage: Our Approach vs. Amex's
+- Transaction volume by region, type, and response code
+- Response latency distributions
+- Error rates and types
+- Regional health status
+- Workflow execution times
+- Fraud check results
 
-One critical aspect of any payment routing system is persistent storage of transaction data. While Amex's system likely uses specialized databases and extensive caching strategies for transaction persistence, we implemented a more cloud-native approach with Google Cloud Spanner.
+### 4. Cloud-Native Storage with Spanner
 
-### The Amex Approach (Inferred)
-
-Based on our research, Amex maintains transaction data with a careful balance of regional data locality and global consistency:
-
-```mermaid
-graph TD
-    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
-    
-    A1[Payment Networks] --> A2[GTR]
-    A2 --> A3[Regional Processor]
-    A3 -->|Cache local data| A4[Regional Data Store]
-    A3 -->|Sync critical data| A5[Central Transaction Database]
-    
-    class A1 external
-    class A2,A3 internal
-    class A4,A5 storage
-```
-
-Amex appears to use a hybrid approach to data storage:
-
-1. **Regional Caching**: Each region maintains local caching mechanisms to access frequently needed data without cross-region calls. This follows their principle of keeping transactions localized by design.
-
-2. **Data Locality**: Their architecture emphasizes keeping data close to where it's processed, with patterns designed to minimize data transfer between regions.
-
-3. **Replicated Storage**: Critical transaction data is eventually synchronized across regions to maintain global consistency while preserving performance.
-
-### Our Implementation with Spanner
-
-For our Pulse project, we chose Google Cloud Spanner as our persistent storage solution, implementing it as a pluggable storage interface:
-
-```mermaid
-graph TD
-    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    classDef storage fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    
-    B1[Payment Client] --> B2[ISO 8583 Server]
-    B2 --> B3[Router]
-    B3 --> B4[US East Processor]
-    B3 --> B5[EU West Processor]
-    B3 -.->|Async Store| B6[Spanner]
-    B4 -.->|Query| B6
-    B5 -.->|Query| B6
-    
-    class B1 external
-    class B2,B3,B4,B5 internal
-    class B6 storage
-```
-
-Key aspects of our design include:
-
-1. **Abstraction Through Interface**: We implemented a clean `Storage` interface that can be fulfilled by different storage providers, making our system adaptable to various persistence technologies.
+Pulse integrates with Google Cloud Spanner for globally consistent transaction storage:
 
 ```go
-// Storage defines the interface for persistence operations
-type Storage interface {
-    // SaveAuthorization persists the authorization request and result
-    SaveAuthorization(ctx context.Context, auth *proto.AuthRequest, region string, approved bool) error
-
-    // GetTransaction retrieves a transaction by STAN
-    GetTransaction(ctx context.Context, stan string) (*proto.AuthRecord, error)
-
-    // Close closes the storage connection
-    Close() error
+// Store implements storage.Storage interface for Spanner
+type Store struct {
+    client         *spanner.Client
+    databaseString string
+    writeLatency   *prometheus.HistogramVec
+    readLatency    *prometheus.HistogramVec
+    errorCount     *prometheus.CounterVec
 }
 ```
 
-2. **Asynchronous Storage**: Unlike traditional systems that block on database operations, our implementation stores transactions asynchronously to avoid impacting response time:
+Unlike traditional payment systems that often use custom replication solutions, Pulse leverages Spanner's global consistency to simplify the architecture while maintaining strong transactional guarantees.
 
-```go
-// Record the transaction in storage
-if r.storage != nil {
-    storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-    defer cancel()
-    
-    // Determine if approved based on response code
-    approved := resp.ResponseCode == "00"
-    
-    // Save to storage asynchronously to avoid impacting response time
-    go func() {
-        if err := r.storage.SaveAuthorization(storeCtx, req, region, approved); err != nil {
-            log.Printf("Failed to store authorization: %v", err)
-        }
-    }()
-}
-```
+## Lessons from Building Pulse
 
-3. **Comprehensive Metrics**: Our implementation includes detailed metrics for monitoring storage performance:
+Developing Pulse taught me several valuable lessons about modern financial infrastructure:
 
-```go
-writeLatency := promauto.NewHistogramVec(
-    prometheus.HistogramOpts{
-        Name:    "pulse_spanner_write_latency_seconds",
-        Help:    "Spanner write latency distribution in seconds",
-        Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to ~1s
-    },
-    []string{"operation"},
-)
-```
+### 1. Protocol Translation as a Design Pattern
 
-4. **Global Consistency**: Unlike Amex's likely region-specific approach, Spanner provides global consistency across regions without requiring custom synchronization logic, simplifying our implementation while maintaining strict consistency.
+The clean separation between ISO 8583 externally and Protocol Buffers internally proved to be a powerful architectural pattern. By establishing this boundary, Pulse can evolve its internal architecture without breaking external compatibility.
 
-### Key Differences and Trade-offs
+This pattern applies beyond payments to any system with legacy external interfaces but modern internal needs:
 
-The primary differences between our approach and Amex's inferred approach highlight interesting trade-offs:
+- **Healthcare systems** dealing with HL7 or DICOM protocols
+- **Telecommunications** working with SS7 and other telecom standards
+- **EDI and B2B** integration platforms
+- **IoT systems** supporting multiple device protocols
 
-1. **Managed vs. Custom**: By using Spanner, we leverage a fully managed database service, while Amex likely has more customized solutions tailored to their specific performance needs.
+### 2. Workflow-First Architecture
 
-2. **Global vs. Regional**: Spanner offers global consistency by default, which simplifies our architecture. Amex likely uses a more complex tiered storage approach with local caching and global synchronization to optimize for both latency and consistency.
+The integration of Temporal for workflow orchestration transformed how transactions are processed. Instead of treating each message as an isolated event, Pulse models transactions as workflows with multiple steps, retry logic, and durable state.
 
-3. **Simplicity vs. Optimization**: Our design favors simplicity and developer productivity, while Amex's approach is likely more optimized for their specific workload patterns and extreme performance requirements.
+This approach simplifies handling complex scenarios like:
 
-4. **Asynchronous Consistency**: Both approaches use asynchronous storage to avoid impacting response times, but differ in how they manage eventual consistency. Our Spanner implementation provides stronger consistency guarantees with less custom code.
+- **Two-phase authorizations** (pre-auth and completion)
+- **Retries with exponential backoff**
+- **Cross-service coordination**
+- **Long-running payment processes**
 
-By implementing transaction storage with Spanner, we've created a system that preserves the core principles of Amex's design (asynchronous storage, high performance) while leveraging cloud-native technologies to simplify implementation and maintenance.
+### 3. Balancing Legacy and Innovation
 
-## Why Go?
+Building Pulse required a careful balance between compatibility with legacy protocols and adoption of modern architectural patterns. The key insight was identifying where to draw the boundaries between old and new.
 
-Through my reverse engineering efforts, I deduced several reasons why Amex chose Go for their reimplementation. I followed the same path for Pulse:
+This principle extends beyond payment systems to any modernization effort:
 
-1. **Goroutines for Concurrency**: Go's lightweight threads make it easy to handle thousands of concurrent connections without the complexity of thread pools or callback hells.
+1. **Identify the essential interfaces** that must remain compatible
+2. **Establish clean translation layers** at those boundaries
+3. **Modernize everything behind those boundaries**
+4. **Add new capabilities** that enhance but don't break compatibility
 
-2. **No JVM Warm-up**: Unlike Java, Go has no cold start issues, which is crucial for payment processing where the first transaction must be as fast as the millionth.
+### 4. Go as an Ideal Language for Financial Infrastructure
 
-3. **Low-latency GC**: Go's garbage collector is optimized for low pause times, essential for transaction processing where consistent latency is more important than maximum throughput.
+Go proved to be an excellent choice for building Pulse, offering:
 
-4. **Strong Typing with Simplicity**: Go provides the safety of static typing without the verbosity of Java or the complexity of C++.
+- **Goroutines for concurrency**: Handling thousands of connections efficiently
+- **Low-latency garbage collection**: Minimizing pause times for consistent performance
+- **Compiled performance**: Fast startup and predictable execution
+- **Strong type safety**: Preventing common runtime errors
+- **Simplicity**: Making the codebase approachable and maintainable
 
-The transaction flow in Pulse mirrors what I reverse engineered from Amex's system:
+These characteristics make Go particularly well-suited for financial systems that require both performance and reliability.
 
-```mermaid
-flowchart LR
-    classDef iso fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
-    classDef proto fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    classDef grpc fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    
-    A[ISO8583<br>TCP Input] --> B[Protocol<br>Buffer]
-    B --> C[gRPC<br>Routing]
-    C --> D[Protocol<br>Buffer]
-    D --> E[ISO8583<br>TCP Output]
-    
-    class A,E iso
-    class B,D proto
-    class C grpc
-```
+## Future Directions
 
-1. ISO 8583 message arrives via TCP
-2. Message is transformed to Protocol Buffers
-3. Request is routed to the appropriate regional processor via gRPC
-4. Response is transformed back to ISO 8583
-5. Response is sent back via the persistent TCP connection
+While Pulse already implements many advanced features, several exciting enhancements are planned:
 
-## Key Architectural Lessons from Reverse Engineering
+1. **Expanded Workflow Patterns**: Additional workflow templates for common payment scenarios like installments, subscriptions, and multi-currency transactions.
 
-Reverse engineering Amex's system and building my own implementation taught me several valuable lessons about financial transaction routing:
+2. **Enhanced Fraud Models**: Integration with machine learning-based fraud detection, allowing real-time model updates and more sophisticated risk scoring.
 
-1. **Protocol Translation as a Design Pattern**: The boundary between ISO 8583 and Protocol Buffers is not just an implementation detail—it's a powerful architectural pattern. By drawing a clear line between external compatibility and internal innovation, you can modernize systems without disrupting existing integrations. This pattern applies beyond payments to any system with legacy external interfaces but modern internal needs.
+3. **Multi-Protocol Support**: Adding support for ISO 20022, REST APIs, and other emerging payment protocols while maintaining the same internal architecture.
 
-2. **Persistent Connections Matter in Latency-Sensitive Environments**: For high-throughput, low-latency systems, persistent TCP connections significantly outperform request-response patterns like HTTP. The overhead of establishing connections for each transaction adds up quickly, especially at financial scale. This is why even modern systems dealing with real-time financial data still prefer TCP over HTTP.
+4. **Event Sourcing**: Implementing an event sourcing pattern for complete transaction history and audit capabilities.
 
-3. **Circuit Breaking is Essential for Reliability**: Financial systems must degrade gracefully. Circuit breakers prevent cascading failures by redirecting traffic away from unhealthy components. The pattern I inferred from Amex—and implemented in Pulse—shows how statistical monitoring can enable automatic failover without manual intervention.
+5. **Cross-Region Optimization**: Advanced routing algorithms that consider network latency, regional load, and cost optimization.
 
-4. **Go Excels in Legacy-Adjacent Systems**: Go's combination of performance, simplicity, and modern language features makes it ideal for modernizing legacy systems. The lack of runtime warm-up, predictable performance, and excellent concurrency support address key challenges in financial processing.
+## Conclusion: Innovation Within Constraints
 
-## What I'd Do Differently at Enterprise Scale
+Building Pulse demonstrated that it's possible to create innovative, cloud-native financial infrastructure while respecting the constraints of established protocols and practices. Rather than viewing legacy compatibility as a limitation, it can be seen as a design parameter that focuses innovation where it matters most.
 
-While my reverse engineering efforts captured the essence of Amex's architecture, a production-grade system would need several enhancements:
+For fintech builders and infrastructure engineers, Pulse offers both a practical tool and an architectural blueprint—showing how to combine proven patterns from industry leaders with modern cloud-native approaches to create systems that are both backward-compatible and forward-looking.
 
-1. **Stateful Session Management**: Real payment processors track session state across transactions, which would require distributed session storage.
-
-2. **Enhanced Security**: Production systems need TLS, mutual authentication, HSM integration, and comprehensive audit logging.
-
-3. **Horizontal Scaling**: Regional processors would need to be horizontally scalable, likely using consistent hashing or other load balancing techniques.
-
-4. **Database Integration**: Production systems would likely persist transaction data for compliance and reconciliation purposes.
-
-5. **Multiple Protocol Support**: Beyond ISO 8583, real-world systems often need to support multiple protocols simultaneously (ISO 20022, proprietary formats, etc.).
-
-## Protocol Transformation: A Pattern for Modernizing the Unmodernizable
-
-This reverse engineering project revealed a broader principle that extends beyond payment systems: **protocol transformation as a modernization strategy**. When faced with legacy protocols that can't be changed, the answer isn't to rebuild everything in their image—it's to create a clear boundary where translation occurs.
-
-This pattern applies to many domains:
-
-1. **Financial Services**: Beyond credit cards, systems like ACH, SWIFT, and FIX all use legacy protocols that aren't going away.
-
-2. **Healthcare**: HL7 and DICOM protocols are entrenched but can benefit from modern internal architectures.
-
-3. **Telecommunications**: SS7 and other telecom protocols remain essential but can be wrapped in modern systems.
-
-4. **Enterprise Integration**: EDI, AS2, and other B2B protocols can be interfaced through transformation layers.
-
-The key insight is that you don't need to modernize everything at once. By identifying the right abstraction boundaries and implementing clean translations, you can evolve your systems incrementally while maintaining compatibility.
-
-## Conclusion: Modern Tools, Legacy Terrain
-
-Reverse engineering Amex's Global Transaction Router was an enlightening journey into how modern architecture can be applied to legacy financial protocols. The resulting Pulse project demonstrates that with the right design choices, it's possible to build a system that's both backward-compatible and forward-looking.
-
-For infrastructure engineers and fintech developers wrestling with similar challenges, the lessons are clear:
-
-1. **Protocol transformation creates a clear boundary** between legacy compatibility and modern implementation.
-
-2. **Go offers unique advantages in latency-sensitive environments** that make it well-suited for financial infrastructure.
-
-3. **Modern reliability patterns like circuit breakers** can be applied even to systems with legacy interfaces.
-
-4. **Observability is essential** for maintaining reliability in complex distributed systems.
-
-The future of financial infrastructure isn't about replacing ISO 8583—it's about building better systems around it. By understanding how companies like Amex have navigated this challenge, we can apply these patterns to modernize other critical but aging systems across industries.
+The future of financial infrastructure isn't about replacing existing protocols—it's about building smarter, more resilient systems around them. By drawing inspiration from established patterns while embracing modern architectural principles, we can create payment systems that honor the past while enabling the future.

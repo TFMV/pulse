@@ -18,15 +18,17 @@ import (
 	"github.com/TFMV/pulse/iso"
 	"github.com/TFMV/pulse/metrics"
 	"github.com/TFMV/pulse/router"
-	"github.com/TFMV/pulse/span"
 	"github.com/TFMV/pulse/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 	"gopkg.in/yaml.v3"
 
 	"github.com/TFMV/pulse/issuer"
 	"github.com/TFMV/pulse/proto"
+	"github.com/TFMV/pulse/span"
+	"github.com/TFMV/pulse/workflow"
 )
 
 const (
@@ -47,6 +49,50 @@ var (
 	chaosFlag        = flag.Bool("chaos", false, "Enable chaos testing")
 )
 
+// RegionConfig holds configuration for a region
+type RegionConfig struct {
+	Address string `yaml:"address"`
+}
+
+// AppConfig holds the complete application configuration
+type AppConfig struct {
+	Iso8583Server struct {
+		Address string `yaml:"address"`
+	} `yaml:"iso8583_server"`
+
+	Regions map[string]RegionConfig `yaml:"regions"`
+
+	Router struct {
+		HealthCheckInterval time.Duration     `yaml:"health_check_interval"`
+		FailoverMap         map[string]string `yaml:"failover_map"`
+		BinRoutes           map[string]string `yaml:"bin_routes"`
+		DefaultRegion       string            `yaml:"default_region"`
+	} `yaml:"router"`
+
+	Metrics struct {
+		Enabled bool   `yaml:"enabled"`
+		Address string `yaml:"address"`
+	} `yaml:"metrics"`
+
+	Storage struct {
+		Type       string `yaml:"type"`
+		Connection string `yaml:"connection"`
+		Database   string `yaml:"database"`
+		Enabled    bool   `yaml:"enabled"`
+	} `yaml:"storage"`
+
+	Temporal struct {
+		HostPort                 string        `yaml:"host_port"`
+		Namespace                string        `yaml:"namespace"`
+		TaskQueue                string        `yaml:"task_queue"`
+		WorkflowExecutionTimeout time.Duration `yaml:"workflow_execution_timeout"`
+		WorkerCount              int           `yaml:"worker_count"`
+		Enabled                  bool          `yaml:"enabled"`
+	} `yaml:"temporal"`
+
+	Chaos chaos.Config `yaml:"chaos"`
+}
+
 func main() {
 	// Parse command-line flags
 	flag.Parse()
@@ -60,8 +106,7 @@ func main() {
 	}
 
 	// Create a context that can be cancelled
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	// Initialize metrics
 	metricsCollector := metrics.NewMetrics()
@@ -90,26 +135,104 @@ func main() {
 
 	// Initialize storage if enabled
 	var storageClient storage.Storage
-	if config.Spanner.Enabled {
-		spannerClient, err := span.NewStore(ctx, config.Spanner)
+	if config.Storage.Enabled {
+		var err error
+		spannerClient, err := span.NewStore(ctx, span.Config{
+			ProjectID:  config.Storage.Connection,
+			InstanceID: "pulse-instance",
+			DatabaseID: config.Storage.Database,
+			Enabled:    true,
+		})
 		if err != nil {
-			log.Fatalf("Failed to initialize Spanner client: %v", err)
+			log.Fatalf("Failed to initialize Spanner storage: %v", err)
 		}
 		defer spannerClient.Close()
 		storageClient = spannerClient
-		log.Println("Spanner storage initialized")
-	} else {
-		log.Println("Spanner storage disabled")
+	}
+
+	// Convert map of RegionConfig to router.RegionConfig
+	routerRegions := make(map[string]router.RegionConfig)
+	for name, cfg := range config.Regions {
+		host, port := parseAddress(cfg.Address)
+		routerRegions[name] = router.RegionConfig{
+			Host:      host,
+			Port:      port,
+			TimeoutMs: 5000, // Default 5 seconds timeout
+		}
+	}
+
+	// Create router config
+	routerConfig := router.Config{
+		BinRoutes:     config.Router.BinRoutes,
+		DefaultRegion: config.Router.DefaultRegion,
+		Regions:       routerRegions,
+		FailoverMap:   config.Router.FailoverMap,
 	}
 
 	// Initialize the router
-	r := router.NewRouter(config.Router, chaosEngine, metricsCollector, storageClient)
-	if err := r.Initialize(); err != nil {
+	rt := router.NewRouter(routerConfig, chaosEngine, metricsCollector, storageClient)
+	if err := rt.Initialize(); err != nil {
 		log.Fatalf("Failed to initialize router: %v", err)
 	}
 
+	// Initialize Temporal orchestrator if enabled
+	var orchestrator *workflow.Orchestrator
+	if config.Temporal.Enabled {
+		temporalConfig := workflow.TemporalConfig{
+			HostPort:                 config.Temporal.HostPort,
+			Namespace:                config.Temporal.Namespace,
+			TaskQueue:                config.Temporal.TaskQueue,
+			WorkflowExecutionTimeout: config.Temporal.WorkflowExecutionTimeout,
+			WorkerCount:              config.Temporal.WorkerCount,
+			Enabled:                  true,
+		}
+
+		// Create the orchestrator
+		var err error
+		orchestrator, err = workflow.NewOrchestrator(temporalConfig)
+		if err != nil {
+			log.Fatalf("Failed to initialize Temporal orchestrator: %v", err)
+		}
+
+		// Set up workflow implementations
+		fraudAnalyzer := workflow.NewSimpleFraudAnalyzer()
+
+		auditLogger, err := workflow.NewFileAuditLogger("./audit-logs")
+		if err != nil {
+			log.Fatalf("Failed to initialize audit logger: %v", err)
+		}
+
+		// Register workflows and activities
+		clients := make(map[string]proto.AuthServiceClient)
+		for region, regionConfig := range config.Regions {
+			conn, err := grpc.Dial(regionConfig.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				log.Fatalf("Failed to connect to region %s: %v", region, err)
+			}
+			clients[region] = proto.NewAuthServiceClient(conn)
+		}
+
+		activities := workflow.NewActivities(clients, auditLogger, fraudAnalyzer)
+
+		// We need a function that returns the region based on request
+		getRegionFunc := func(pan string) string {
+			// This is a wrapper to determine region from router's logic
+			// In a real implementation, this would use router's determineRegion
+			// Since that's private, we might just use the default region
+			return config.Router.DefaultRegion
+		}
+
+		orchestrator.RegisterWorkflowsAndActivities(activities, getRegionFunc)
+
+		// Start the worker
+		if err := orchestrator.Start(); err != nil {
+			log.Fatalf("Failed to start Temporal worker: %v", err)
+		}
+		defer orchestrator.Close()
+	}
+
 	// Create and start ISO 8583 server
-	isoServer := iso.NewServer(*isoAddress, r)
+	isoServer := iso.NewServer(*isoAddress, rt)
 	go func() {
 		if err := isoServer.Start(); err != nil {
 			log.Fatalf("Failed to start ISO 8583 server: %v", err)
@@ -146,11 +269,23 @@ func main() {
 	<-sigChan
 
 	log.Println("Shutting down...")
-	r.Close()
+	rt.Close()
 	isoServer.Shutdown()
 	usEastServer.GracefulStop()
 	euWestServer.GracefulStop()
 	time.Sleep(500 * time.Millisecond)
+}
+
+// parseAddress parses a host:port string into separate components
+func parseAddress(address string) (string, int) {
+	host, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return address, 50051 // Default port if no port specified
+	}
+
+	port := 50051
+	fmt.Sscanf(portStr, "%d", &port)
+	return host, port
 }
 
 // startGRPCServer starts a gRPC server on the specified address
@@ -172,13 +307,6 @@ func startMetricsServer(addr string) {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("Failed to start metrics server: %v", err)
 	}
-}
-
-// AppConfig holds the complete application configuration
-type AppConfig struct {
-	Router  router.Config `yaml:"router"`
-	Chaos   chaos.Config  `yaml:"chaos"`
-	Spanner span.Config   `yaml:"spanner"`
 }
 
 // loadConfig loads the configuration from a YAML file

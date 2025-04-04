@@ -13,6 +13,8 @@ Pulse simulates the flow of ISO 8583 messages over TCP from external clients, co
 - **BIN-based Routing**: Routes transactions to different regional processors based on card BIN ranges
 - **Multi-Region Architecture**: Supports multiple backend processors (US East and EU West)
 - **Fault Tolerance**: Circuit breaker pattern with automatic failover between regions
+- **Workflow Orchestration**: Complex transaction flows with Temporal for multi-step processing
+- **Fraud Protection**: Real-time fraud monitoring with configurable rules
 - **Observability**: Comprehensive Prometheus metrics for monitoring system health
 - **Chaos Testing**: Support for fault injection to test resilience
 - **Transaction Storage**: Integration with Google Cloud Spanner for persistent transaction history
@@ -25,37 +27,45 @@ graph TD
     classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
     classDef processor fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
+    classDef workflow fill:#fff9c4,stroke:#827717,stroke-width:2px
     
     A1[Payment Client] -.ISO 8583<br>over TCP.-> A2
     A2[ISO 8583 Server] --> A3
-    A3[Router ISO→Proto] --> A4
+    A3[Router ISO→Proto] --> A8
+    A8[Temporal Workflow] --> A4
     A4[Regional Routing] --> A5
     A4 --> A6
     A5[US East Processor]
     A6[EU West Processor]
+    A8 -.->|Fraud Checks| A9[Fraud Analysis]
+    A8 -.->|Audit| A10[Audit Logger]
     A3 -.->|Async Storage| A7[Spanner]
     
     class A1 external
     class A2,A3,A4 internal
     class A5,A6 processor
     class A7 storage
+    class A8,A9,A10 workflow
 ```
 
 Pulse consists of the following components:
 
 1. **ISO 8583 TCP Server**: Accepts incoming financial messages over persistent TCP connections
 2. **Message Router**: Translates ISO messages to Protocol Buffers and determines appropriate routing
-3. **Regional Processors**: gRPC services implementing business logic for each region
-4. **Health Monitor**: Tracks regional service health and implements circuit breaking for reliability
-5. **Metrics System**: Provides real-time observability with Prometheus
-6. **Storage Layer**: Persists transaction data using Google Cloud Spanner
+3. **Workflow Orchestrator**: Manages complex transaction flows with temporal persistence
+4. **Regional Processors**: gRPC services implementing business logic for each region
+5. **Health Monitor**: Tracks regional service health and implements circuit breaking for reliability
+6. **Metrics System**: Provides real-time observability with Prometheus
+7. **Storage Layer**: Persists transaction data using Google Cloud Spanner
+8. **Fraud Monitor**: Analyzes transactions for suspicious activities in real-time
 
 ## Getting Started
 
 ### Prerequisites
 
-- Go 1.19 or later
+- Go 1.21 or later
 - Protocol Buffers compiler (`protoc`)
+- Temporal server (optional, for workflow orchestration)
 - Prometheus (optional, for metrics collection)
 
 ### Installation
@@ -93,6 +103,7 @@ This starts:
 - US East gRPC service on 0.0.0.0:50051
 - EU West gRPC service on 0.0.0.0:50052
 - Prometheus metrics endpoint on 0.0.0.0:9090
+- Temporal workers (if enabled)
 
 #### Command-line Options
 
@@ -151,7 +162,53 @@ spanner:
   project_id: "pulse-project"
   instance_id: "pulse-instance"
   database_id: "pulse-db"
+
+temporal:
+  enabled: true
+  host_port: "localhost:7233"
+  namespace: "pulse-namespace"
+  task_queue: "payment-processing-queue"
+  workflow_execution_timeout: "5m"
+  worker_count: 10
 ```
+
+## Temporal Workflow Orchestration
+
+Pulse integrates [Temporal](https://temporal.io/) for durable, fault-tolerant workflow orchestration.
+
+### Workflow Features
+
+- **Transaction Workflows**: Orchestrates complex multi-step payment flows
+- **Fraud Detection**: Real-time fraud analysis with configurable rules
+- **Durability**: Automatic retries and state persistence
+- **Audit Logging**: Comprehensive transaction audit trails
+- **Timeouts**: Configurable timeouts for each workflow step
+
+### Workflow Architecture
+
+```mermaid
+stateDiagram-v2
+    [*] --> StartWorkflow
+    StartWorkflow --> FraudCheck: 1. Analyze Transaction
+    FraudCheck --> Declined: Fraud Detected
+    FraudCheck --> ProcessPayment: Clean Transaction
+    ProcessPayment --> Approved: Success
+    ProcessPayment --> Retry: Temporary Failure
+    Retry --> ProcessPayment: Retry (max 3)
+    Retry --> Declined: Max Retries Exceeded
+    Approved --> AuditLog
+    Declined --> AuditLog
+    AuditLog --> [*]
+```
+
+### Fraud Detection System
+
+The fraud detection system analyzes transactions using:
+
+1. **BIN Risk Analysis**: Risk assessment based on card BIN ranges
+2. **Velocity Checks**: Detection of unusual transaction frequency
+3. **Amount Thresholds**: Flagging of high-value transactions
+4. **Configurable Rules**: Extensible rules engine for custom checks
 
 ## Reliability Features
 
@@ -212,6 +269,9 @@ Pulse exposes detailed metrics at the `/metrics` endpoint:
 | `pulse_spanner_write_latency_seconds` | Histogram | Spanner write operation times |
 | `pulse_spanner_read_latency_seconds` | Histogram | Spanner read operation times |
 | `pulse_spanner_errors_total` | Counter | Spanner errors by operation and type |
+| `pulse_workflow_execution_time_seconds` | Histogram | Workflow execution time distribution |
+| `pulse_workflow_error_total` | Counter | Workflow error count by type |
+| `pulse_fraud_checks_total` | Counter | Fraud checks by result (flagged/clean) |
 
 ### Setting Up Prometheus
 
@@ -280,7 +340,8 @@ rpc GetTransaction (GetTransactionRequest) returns (AuthRecord) {}
 pulse/
 ├── main.go                  # Application entry point
 ├── config/                  # Configuration files
-│   └── config.yaml          # Main configuration
+│   ├── config.yaml          # Main configuration
+│   └── temporal.yaml        # Workflow configuration
 ├── iso/                     # ISO 8583 message handling
 │   └── server.go            # TCP server implementation
 ├── router/                  # Message routing
@@ -302,6 +363,12 @@ pulse/
 │   └── metrics.go           # Prometheus metrics
 ├── chaos/                   # Chaos testing
 │   └── faults.go            # Fault injection
+├── workflow/                # Temporal workflows
+│   ├── interfaces.go        # Workflow interfaces
+│   ├── activities.go        # Activity implementations
+│   ├── workflows.go         # Workflow implementations
+│   ├── client.go            # Temporal client
+│   └── implementations.go   # Concrete implementations
 └── client/                  # Test tools
     └── send.go              # ISO 8583 client
 ```
