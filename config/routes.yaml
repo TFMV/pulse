@@ -1,0 +1,26 @@
+bin_routes:
+  "4000-4999": "us-east"
+  "5000-5999": "eu-west"
+default_region: "us-east"
+
+# Regional service configurations
+regions:
+  us-east:
+    host: "localhost"
+    port: 50051
+    timeout_ms: 5000
+  eu-west:
+    host: "localhost"
+    port: 50052
+    timeout_ms: 8000
+
+# Failover configuration mapping primary regions to fallback regions
+failover_map:
+  "us-east": "eu-west"
+  "eu-west": "us-east"
+
+# Chaos testing settings (disabled by default)
+chaos:
+  enabled: false
+  fault_probability: 0.1 # 10% chance of injecting a fault
+  max_delay_ms: 1000 # Maximum delay in milliseconds

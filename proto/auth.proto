@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package pulse;
+
+option go_package = "github.com/TFMV/pulse/proto";
+
+// AuthService handles authorization requests and responses
+service AuthService {
+  // ProcessAuth handles authorization requests
+  rpc ProcessAuth (AuthRequest) returns (AuthResponse) {}
+}
+
+// AuthRequest represents an ISO8583 authorization request converted to protobuf
+message AuthRequest {
+  string mti = 1;                  // Message Type Indicator (0100 for auth request)
+  string pan = 2;                  // Primary Account Number (Field 2)
+  string amount = 3;               // Transaction Amount (Field 4)
+  string transmission_time = 4;    // Transmission Timestamp (Field 7)
+  string stan = 5;                 // System Trace Audit Number (Field 11)
+  string region = 6;               // Region where the request is routed
+}
+
+// AuthResponse represents an ISO8583 authorization response converted to protobuf
+message AuthResponse {
+  string mti = 1;                  // Message Type Indicator (0110 for auth response)
+  string pan = 2;                  // Primary Account Number (Field 2)
+  string amount = 3;               // Transaction Amount (Field 4)
+  string transmission_time = 4;    // Transmission Timestamp (Field 7)
+  string stan = 5;                 // System Trace Audit Number (Field 11)
+  string response_code = 6;        // Response Code (Field 39)
+  int64 processing_time_ms = 7;    // Processing time in milliseconds
+} 
