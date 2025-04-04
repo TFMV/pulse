@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -17,10 +18,15 @@ import (
 	"github.com/TFMV/pulse/iso"
 	"github.com/TFMV/pulse/metrics"
 	"github.com/TFMV/pulse/router"
+	"github.com/TFMV/pulse/span"
+	"github.com/TFMV/pulse/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	"gopkg.in/yaml.v3"
+
+	"github.com/TFMV/pulse/issuer"
+	"github.com/TFMV/pulse/proto"
 )
 
 const (
@@ -36,9 +42,13 @@ var (
 	clientServerAddr = flag.String("server", "localhost:8583", "Server address for client mode")
 	injectFaults     = flag.Bool("inject-faults", false, "Enable chaos testing with fault injection")
 	metricsAddr      = flag.String("metrics", defaultMetricsAddress, "Prometheus metrics endpoint address")
+	usEastAddr       = flag.String("us-east", "localhost:50051", "US East issuer address")
+	euWestAddr       = flag.String("eu-west", "localhost:50052", "EU West issuer address")
+	chaosFlag        = flag.Bool("chaos", false, "Enable chaos testing")
 )
 
 func main() {
+	// Parse command-line flags
 	flag.Parse()
 
 	// Handle client mode
@@ -49,11 +59,16 @@ func main() {
 		return
 	}
 
+	// Create a context that can be cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Initialize metrics
 	metricsCollector := metrics.NewMetrics()
 
-	// Start Prometheus metrics endpoint
+	// Start metrics server
 	go startMetricsServer(*metricsAddr)
+	log.Printf("Metrics server started on %s", *metricsAddr)
 
 	// Load configuration
 	config, err := loadConfig(*configPath)
@@ -61,34 +76,69 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Override chaos setting from command line if specified
+	if *chaosFlag {
+		config.Chaos.Enabled = true
+	}
+
 	// Initialize chaos engine if enabled
 	var chaosEngine *chaos.Engine
-	if *injectFaults {
+	if config.Chaos.Enabled {
 		chaosEngine = chaos.NewEngine(config.Chaos)
 		log.Printf("Chaos testing enabled with fault probability %.1f%%", config.Chaos.FaultProbability*100)
 	}
 
+	// Initialize storage if enabled
+	var storageClient storage.Storage
+	if config.Spanner.Enabled {
+		spannerClient, err := span.NewStore(ctx, config.Spanner)
+		if err != nil {
+			log.Fatalf("Failed to initialize Spanner client: %v", err)
+		}
+		defer spannerClient.Close()
+		storageClient = spannerClient
+		log.Println("Spanner storage initialized")
+	} else {
+		log.Println("Spanner storage disabled")
+	}
+
 	// Initialize the router
-	r := router.NewRouter(config.Router, chaosEngine, metricsCollector)
+	r := router.NewRouter(config.Router, chaosEngine, metricsCollector, storageClient)
 	if err := r.Initialize(); err != nil {
 		log.Fatalf("Failed to initialize router: %v", err)
 	}
-	defer r.Close()
 
-	// Start the ISO8583 server
+	// Create and start ISO 8583 server
 	isoServer := iso.NewServer(*isoAddress, r)
 	go func() {
-		log.Printf("Starting ISO8583 server on %s", *isoAddress)
 		if err := isoServer.Start(); err != nil {
-			log.Fatalf("ISO8583 server error: %v", err)
+			log.Fatalf("Failed to start ISO 8583 server: %v", err)
 		}
 	}()
 
-	// Start the gRPC issuer servers for each region
-	for region, regionCfg := range config.Router.Regions {
-		address := net.JoinHostPort(regionCfg.Host, "50051")
-		go startIssuerService(address, region)
-	}
+	// Create issuer instances
+	usEastIssuer := issuer.NewUSEastIssuer()
+	euWestIssuer := issuer.NewEUWestIssuer()
+
+	// Wrap issuers with storage if enabled
+	usEastIssuerWithStorage := issuer.WrapWithStorage(usEastIssuer, storageClient)
+	euWestIssuerWithStorage := issuer.WrapWithStorage(euWestIssuer, storageClient)
+
+	// Create gRPC servers
+	usEastServer := grpc.NewServer()
+	euWestServer := grpc.NewServer()
+
+	// Register the services
+	proto.RegisterAuthServiceServer(usEastServer, usEastIssuerWithStorage)
+	proto.RegisterAuthServiceServer(euWestServer, euWestIssuerWithStorage)
+
+	// Enable reflection on the servers
+	reflection.Register(usEastServer)
+	reflection.Register(euWestServer)
+
+	// Start gRPC servers
+	go startGRPCServer(usEastServer, *usEastAddr, "US-East")
+	go startGRPCServer(euWestServer, *euWestAddr, "EU-West")
 
 	// Wait for termination signal
 	sigChan := make(chan os.Signal, 1)
@@ -96,43 +146,39 @@ func main() {
 	<-sigChan
 
 	log.Println("Shutting down...")
+	r.Close()
 	isoServer.Shutdown()
-
-	// Give services a moment to complete shutdown
+	usEastServer.GracefulStop()
+	euWestServer.GracefulStop()
 	time.Sleep(500 * time.Millisecond)
 }
 
-// startIssuerService starts a gRPC server for a specific region
-func startIssuerService(address, region string) {
+// startGRPCServer starts a gRPC server on the specified address
+func startGRPCServer(server *grpc.Server, address, region string) {
 	lis, err := net.Listen("tcp", address)
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", address, err)
 	}
 
-	s := grpc.NewServer()
-	// issuerInstance := issuer.NewIssuer(config, region)
-	// proto.RegisterAuthServiceServer(s, issuerInstance)
-	reflection.Register(s)
-
-	log.Printf("Starting issuer service for %s region on %s", region, address)
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+	log.Printf("Starting %s issuer service on %s", region, address)
+	if err := server.Serve(lis); err != nil {
+		log.Fatalf("Failed to serve %s: %v", region, err)
 	}
 }
 
 // startMetricsServer starts the Prometheus metrics endpoint
 func startMetricsServer(addr string) {
 	http.Handle("/metrics", promhttp.Handler())
-	log.Printf("Starting Prometheus metrics server on %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Printf("Metrics server error: %v", err)
+		log.Fatalf("Failed to start metrics server: %v", err)
 	}
 }
 
 // AppConfig holds the complete application configuration
 type AppConfig struct {
-	Router router.Config `yaml:"router"`
-	Chaos  chaos.Config  `yaml:"chaos"`
+	Router  router.Config `yaml:"router"`
+	Chaos   chaos.Config  `yaml:"chaos"`
+	Spanner span.Config   `yaml:"spanner"`
 }
 
 // loadConfig loads the configuration from a YAML file

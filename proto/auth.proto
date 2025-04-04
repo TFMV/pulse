@@ -8,6 +8,9 @@ option go_package = "github.com/TFMV/pulse/proto";
 service AuthService {
   // ProcessAuth handles authorization requests
   rpc ProcessAuth (AuthRequest) returns (AuthResponse) {}
+  
+  // GetTransaction retrieves a transaction by STAN
+  rpc GetTransaction (GetTransactionRequest) returns (AuthRecord) {}
 }
 
 // AuthRequest represents an ISO8583 authorization request converted to protobuf
@@ -29,4 +32,20 @@ message AuthResponse {
   string stan = 5;                 // System Trace Audit Number (Field 11)
   string response_code = 6;        // Response Code (Field 39)
   int64 processing_time_ms = 7;    // Processing time in milliseconds
+}
+
+// GetTransactionRequest is used to request a transaction by STAN
+message GetTransactionRequest {
+  string stan = 1;                 // System Trace Audit Number
+}
+
+// AuthRecord represents a stored transaction in Spanner
+message AuthRecord {
+  string stan = 1;                 // System Trace Audit Number
+  string pan = 2;                  // Primary Account Number
+  string amount = 3;               // Transaction Amount
+  string region = 4;               // Processing Region
+  bool approved = 5;               // Whether the transaction was approved
+  string transmission_time = 6;    // Original transmission timestamp
+  string inserted_at = 7;          // When the record was inserted into storage
 } 

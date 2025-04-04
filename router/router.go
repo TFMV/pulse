@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/TFMV/pulse/proto"
+	"github.com/TFMV/pulse/storage"
 )
 
 // Config holds router configuration
@@ -49,10 +50,11 @@ type Router struct {
 	healthMutex         sync.RWMutex
 	healthCheckInterval time.Duration
 	stopHealthCheck     chan struct{}
+	storage             storage.Storage
 }
 
 // NewRouter creates a new router with the given configuration
-func NewRouter(config Config, chaosEngine *chaos.Engine, metricsCollector *metrics.Metrics) *Router {
+func NewRouter(config Config, chaosEngine *chaos.Engine, metricsCollector *metrics.Metrics, storage storage.Storage) *Router {
 	// Create a message spec for ISO8583 messages
 	spec := &iso8583.MessageSpec{
 		Name: "ISO 8583 v1987",
@@ -87,6 +89,7 @@ func NewRouter(config Config, chaosEngine *chaos.Engine, metricsCollector *metri
 		metrics:             metricsCollector,
 		healthCheckInterval: 10 * time.Second,
 		stopHealthCheck:     make(chan struct{}),
+		storage:             storage,
 	}
 }
 
@@ -321,6 +324,22 @@ func (r *Router) HandleMessage(ctx context.Context, message *iso8583.Message) (*
 			r.metrics.ErrorCount.WithLabelValues(targetRegion, "response_conversion").Inc()
 		}
 		return nil, fmt.Errorf("failed to convert AuthResponse to ISO: %w", err)
+	}
+
+	// Record the transaction in storage
+	if r.storage != nil {
+		storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		// Determine if approved based on response code
+		approved := response.ResponseCode == "00"
+
+		// Save to storage asynchronously to avoid impacting response time
+		go func() {
+			if err := r.storage.SaveAuthorization(storeCtx, authRequest, targetRegion, approved); err != nil {
+				log.Printf("Failed to store authorization: %v", err)
+			}
+		}()
 	}
 
 	return responseMessage, nil

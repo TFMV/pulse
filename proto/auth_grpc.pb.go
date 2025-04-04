@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AuthService_ProcessAuth_FullMethodName = "/pulse.AuthService/ProcessAuth"
+	AuthService_ProcessAuth_FullMethodName    = "/pulse.AuthService/ProcessAuth"
+	AuthService_GetTransaction_FullMethodName = "/pulse.AuthService/GetTransaction"
 )
 
 // AuthServiceClient is the client API for AuthService service.
@@ -30,6 +31,8 @@ const (
 type AuthServiceClient interface {
 	// ProcessAuth handles authorization requests
 	ProcessAuth(ctx context.Context, in *AuthRequest, opts ...grpc.CallOption) (*AuthResponse, error)
+	// GetTransaction retrieves a transaction by STAN
+	GetTransaction(ctx context.Context, in *GetTransactionRequest, opts ...grpc.CallOption) (*AuthRecord, error)
 }
 
 type authServiceClient struct {
@@ -50,6 +53,16 @@ func (c *authServiceClient) ProcessAuth(ctx context.Context, in *AuthRequest, op
 	return out, nil
 }
 
+func (c *authServiceClient) GetTransaction(ctx context.Context, in *GetTransactionRequest, opts ...grpc.CallOption) (*AuthRecord, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AuthRecord)
+	err := c.cc.Invoke(ctx, AuthService_GetTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AuthServiceServer is the server API for AuthService service.
 // All implementations must embed UnimplementedAuthServiceServer
 // for forward compatibility.
@@ -58,6 +71,8 @@ func (c *authServiceClient) ProcessAuth(ctx context.Context, in *AuthRequest, op
 type AuthServiceServer interface {
 	// ProcessAuth handles authorization requests
 	ProcessAuth(context.Context, *AuthRequest) (*AuthResponse, error)
+	// GetTransaction retrieves a transaction by STAN
+	GetTransaction(context.Context, *GetTransactionRequest) (*AuthRecord, error)
 	mustEmbedUnimplementedAuthServiceServer()
 }
 
@@ -70,6 +85,9 @@ type UnimplementedAuthServiceServer struct{}
 
 func (UnimplementedAuthServiceServer) ProcessAuth(context.Context, *AuthRequest) (*AuthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ProcessAuth not implemented")
+}
+func (UnimplementedAuthServiceServer) GetTransaction(context.Context, *GetTransactionRequest) (*AuthRecord, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTransaction not implemented")
 }
 func (UnimplementedAuthServiceServer) mustEmbedUnimplementedAuthServiceServer() {}
 func (UnimplementedAuthServiceServer) testEmbeddedByValue()                     {}
@@ -110,6 +128,24 @@ func _AuthService_ProcessAuth_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AuthService_GetTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).GetTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_GetTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).GetTransaction(ctx, req.(*GetTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AuthService_ServiceDesc is the grpc.ServiceDesc for AuthService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -120,6 +156,10 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProcessAuth",
 			Handler:    _AuthService_ProcessAuth_Handler,
+		},
+		{
+			MethodName: "GetTransaction",
+			Handler:    _AuthService_GetTransaction_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
