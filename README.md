@@ -1,6 +1,6 @@
-# Pulse: Global Transaction Router
+# Pulse
 
-A simplified payment transaction routing system inspired by American Express's architecture, implementing ISO 8583 processing with modern technologies.
+Pulse is a workflow-driven transaction router that processes ISO 8583 messages over TCP, transforms them into protocol buffers, and routes them through Temporal-managed workflows to regional processors—backed by Spanner for global consistency and real-time analytics.
 
 ## Overview
 
@@ -23,29 +23,56 @@ Pulse simulates the flow of ISO 8583 messages over TCP from external clients, co
 
 ```mermaid
 graph TD
-    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    classDef internal fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    classDef processor fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    classDef storage fill:#ffecb3,stroke:#ff6f00,stroke-width:2px
-    classDef workflow fill:#fff9c4,stroke:#827717,stroke-width:2px
-    
-    A1[Payment Client] -.ISO 8583<br>over TCP.-> A2
-    A2[ISO 8583 Server] --> A3
-    A3[Router ISO→Proto] --> A8
-    A8[Temporal Workflow] --> A4
-    A4[Regional Routing] --> A5
+    classDef ext fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px
+    classDef int fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px
+    classDef proc fill:#e8f5e9,stroke:#43a047,stroke-width:2px
+    classDef flow fill:#fff9c4,stroke:#fdd835,stroke-width:2px
+    classDef store fill:#ffe0b2,stroke:#fb8c00,stroke-width:2px
+
+    subgraph Client
+      A1[Payment Terminal\\ISO 8583 over TCP]
+    end
+
+    subgraph Ingress
+      A2[ISO 8583 TCP Server]
+      A3[Protocol Translator\\ISO → Proto]
+    end
+
+    subgraph Workflow Orchestration
+      A8[Temporal Workflow\\Engine]
+      A9[Fraud Analysis]
+      A10[Audit Logger]
+    end
+
+    subgraph Core Routing
+      A4[BIN-Based\\Regional Router]
+    end
+
+    subgraph Regional Processors
+      A5[US East Processor]
+      A6[EU West Processor]
+    end
+
+    subgraph Storage
+      A7[Google Cloud Spanner\\Async Writes + Analytics]
+    end
+
+    A1 --> A2
+    A2 --> A3
+    A3 --> A8
+    A8 --> A4
+    A4 --> A5
     A4 --> A6
-    A5[US East Processor]
-    A6[EU West Processor]
-    A8 -.->|Fraud Checks| A9[Fraud Analysis]
-    A8 -.->|Audit| A10[Audit Logger]
-    A3 -.->|Async Storage| A7[Spanner]
-    
-    class A1 external
-    class A2,A3,A4 internal
-    class A5,A6 processor
-    class A7 storage
-    class A8,A9,A10 workflow
+
+    A8 -.->|Fraud Check| A9
+    A8 -.->|Audit Trail| A10
+    A3 -.->|Persist| A7
+
+    class A1 ext
+    class A2,A3,A4 int
+    class A5,A6 proc
+    class A7 store
+    class A8,A9,A10 flow
 ```
 
 Pulse consists of the following components:
